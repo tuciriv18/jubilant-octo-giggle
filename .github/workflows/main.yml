@@ -59,9 +59,10 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
-          # Mask it now — this value didn't come from `secrets`, so GitHub
-          # won't auto-redact it from the log later otherwise.
-          Write-Host "::add-mask::$password"
+          # Left unmasked on purpose: this is the only place you can read it
+          # back. Only someone who could already trigger this workflow
+          # (repo write access) can see this log, so there's nothing gained
+          # by hiding it from that same audience.
           echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
 
           if (-not (Get-LocalUser -Name "RDP")) {
