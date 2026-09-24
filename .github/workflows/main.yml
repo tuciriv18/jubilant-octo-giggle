@@ -25,8 +25,12 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 2 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          # Remove any existing rule with the same name to avoid duplication.
+          # "No rules match the specified criteria" is expected here on
+          # GitHub-hosted runners (always a fresh VM, so there's never
+          # anything to remove) — muted so it doesn't read like an error.
+          # Kept in case you move this to a self-hosted runner later.
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
 
           # Scope the rule to Tailscale's CGNAT range only (100.64.0.0/10).
           # GitHub-hosted Windows runners get a public IP — an unscoped rule
@@ -63,7 +67,7 @@ jobs:
           # back. Only someone who could already trigger this workflow
           # (repo write access) can see this log, so there's nothing gained
           # by hiding it from that same audience.
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
           if (-not (Get-LocalUser -Name "RDP")) {
               Write-Error "User creation failed"
@@ -157,7 +161,7 @@ jobs:
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
 
           # Keep runner active indefinitely (or until manually cancelled)
