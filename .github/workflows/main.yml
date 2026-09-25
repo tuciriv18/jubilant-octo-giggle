@@ -21,7 +21,8 @@ jobs:
             xfce4-goodies \
             xrdp \
             xorgxrdp \
-            dbus-x11
+            dbus-x11 \
+            dbus
 
       - name: Create User
         env:
@@ -47,21 +48,40 @@ jobs:
       - name: Configure XFCE and XRDP
         shell: bash
         run: |
-          set -e
+          set -eux
 
-          # User XFCE startup
-          sudo -u run bash -c 'printf "%s\n" "startxfce4" > "$HOME/.xsession"'
-          sudo -u run chmod +x /home/run/.xsession
-
-          # Remove stale XFCE session data
+          # Clean any previous XFCE session state
           sudo -u run rm -rf /home/run/.cache/sessions
+          sudo -u run rm -rf /home/run/.config/xfce4/xfconf
 
-          # Configure XRDP startup
+          # Make sure the user's home directory is owned correctly
+          sudo chown -R run:run /home/run
+
+          # XFCE session file
+          sudo -u run bash -c 'cat > /home/run/.xsession <<EOF
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          exec dbus-run-session -- startxfce4
+          EOF'
+
+          sudo chmod 755 /home/run/.xsession
+          sudo chown run:run /home/run/.xsession
+
+          # Explicit XRDP startup
           sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
           #!/bin/sh
 
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
+
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
 
           if [ -r /etc/profile ]; then
               . /etc/profile
@@ -71,32 +91,20 @@ jobs:
               . "$HOME/.profile"
           fi
 
-          exec startxfce4
+          exec dbus-run-session -- startxfce4
           EOF
 
           sudo chmod 755 /etc/xrdp/startwm.sh
 
-          # Allow xrdp to access its TLS certificate
+          # XRDP certificate permissions
           sudo adduser xrdp ssl-cert || true
 
-          # Restart XRDP after configuration
+          # Restart XRDP
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
-          echo "=== XRDP STATUS ==="
+          echo "===== XRDP STATUS ====="
           sudo systemctl --no-pager --full status xrdp || true
-
-      - name: Configure Firewall
-        shell: bash
-        run: |
-          set -e
-
-          sudo apt-get install -y ufw
-
-          sudo ufw allow from 100.64.0.0/10 \
-            to any port 3389 proto tcp
-
-          sudo ufw --force enable
 
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
@@ -142,6 +150,40 @@ jobs:
           echo "=== XFCE CHECK ==="
           command -v startxfce4
           command -v xfce4-session
+
+      - name: Diagnose XFCE and XRDP
+        shell: bash
+        run: |
+          echo "===== XFCE ====="
+          command -v startxfce4 || true
+          command -v xfce4-session || true
+          command -v xfconfd || true
+          command -v dbus-run-session || true
+
+          echo ""
+          echo "===== XDG CONFIG ====="
+          ls -ld /etc/xdg
+          ls -la /etc/xdg | head -50
+
+          echo ""
+          echo "===== USER SESSION FILE ====="
+          sudo cat /home/run/.xsession
+
+          echo ""
+          echo "===== XRDP LISTENING ====="
+          sudo ss -lntp | grep 3389 || true
+
+          echo ""
+          echo "===== XRDP LOG ====="
+          sudo tail -100 /var/log/xrdp.log || true
+
+          echo ""
+          echo "===== XRDP SESSION LOG ====="
+          sudo tail -150 /var/log/xrdp-sesman.log || true
+
+          echo ""
+          echo "===== USER FILES ====="
+          sudo ls -la /home/run
 
       - name: Maintain Connection
         shell: bash
