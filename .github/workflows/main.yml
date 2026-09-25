@@ -1,214 +1,389 @@
-name: macOS Remote Desktop
+name: Linux Build
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  macos-rdp:
-    runs-on: macos-15-intel
+  secure-build:
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
 
       # ============================================================
-      # 1. Basic macOS information
+      # 1. INSTALL XFCE + XRDP
       # ============================================================
-      - name: Show macOS information
+      - name: Install XFCE XRDP and D-Bus
+        shell: bash
         run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            xfce4-session \
+            xfce4-settings \
+            xfconf \
+            xrdp \
+            xorgxrdp \
+            xorg \
+            dbus \
+            dbus-x11 \
+            dbus-user-session
+
           echo "=========================================="
-          echo "          macOS REMOTE DESKTOP"
+          echo "Packages installed"
           echo "=========================================="
 
-          echo "macOS:"
-          sw_vers
+          echo "xfce4-session:"
+          command -v xfce4-session
 
-          echo
-          echo "Kernel:"
-          uname -a
+          echo "startxfce4:"
+          command -v startxfce4
 
-          echo
-          echo "Current user:"
-          whoami
-
-          echo
-          echo "Console user:"
-          stat -f '%Su' /dev/console || true
+          echo "xfconf-query:"
+          command -v xfconf-query
 
 
       # ============================================================
-      # 2. Create remote desktop user
+      # 2. CREATE USER
       # ============================================================
-      - name: Create remote desktop user
+      - name: Create RDP User
+        shell: bash
         env:
           RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
         run: |
           set -e
 
-          if id run >/dev/null 2>&1; then
-            echo "User 'run' already exists."
+          if [ -z "$RUN_PASSWORD" ]; then
+            echo "::error::RUN_PASSWORD secret is not configured."
+            exit 1
+          fi
+
+          if ! id run >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash run
+          fi
+
+          echo "run:$RUN_PASSWORD" | sudo chpasswd
+
+          sudo usermod -s /bin/bash run
+          sudo usermod -aG sudo run
+
+          sudo mkdir -p /home/run
+
+          sudo chown -R run:run /home/run
+
+          echo "User run configured."
+
+
+      # ============================================================
+      # 3. COMPLETELY RESET XFCE USER CONFIG
+      # ============================================================
+      - name: Reset XFCE User Configuration
+        shell: bash
+        run: |
+          set -e
+
+          echo "Removing old XFCE configuration..."
+
+          sudo rm -rf /home/run/.cache/sessions
+          sudo rm -rf /home/run/.config/xfce4
+          sudo rm -rf /home/run/.config/xfce4-session
+          sudo rm -rf /home/run/.xfce4
+
+          sudo rm -f /home/run/.xsession
+          sudo rm -f /home/run/.Xsession
+          sudo rm -f /home/run/.xsessionrc
+
+          sudo mkdir -p /home/run/.cache
+          sudo mkdir -p /home/run/.config
+
+          sudo chown -R run:run /home/run
+
+          echo "XFCE user configuration reset."
+
+
+      # ============================================================
+      # 4. VERIFY SYSTEM XFCE CONFIGURATION
+      # ============================================================
+      - name: Verify XFCE Configuration
+        shell: bash
+        run: |
+          set -e
+
+          echo ""
+          echo "=========================================="
+          echo "XFCE SYSTEM CONFIGURATION"
+          echo "=========================================="
+
+          echo ""
+          echo "XDG directory:"
+          ls -ld /etc/xdg
+
+          echo ""
+          echo "XFCE directory:"
+          ls -la /etc/xdg/xfce4 || true
+
+          echo ""
+          echo "XFCE xfconf directory:"
+          ls -la \
+            /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/ \
+            2>/dev/null || true
+
+          echo ""
+          echo "xfce4-session.xml:"
+          if [ -f /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml ]; then
+            echo "FOUND"
+            ls -l \
+              /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml
           else
-            echo "Creating user 'run'..."
-
-            sudo sysadminctl \
-              -addUser run \
-              -fullName "Remote Desktop User" \
-              -password "$RUN_PASSWORD"
+            echo "NOT FOUND"
           fi
 
-          sudo dseditgroup -o edit -a run -t user admin || true
-
-          echo
-          echo "User information:"
-          id run
+          echo ""
+          echo "Failsafe entries:"
+          grep -n -i "Failsafe" \
+            /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml \
+            2>/dev/null || true
 
 
       # ============================================================
-      # 3. Locate Apple's Remote Management kickstart utility
+      # 5. CREATE XFCE SESSION
       # ============================================================
-      - name: Locate Apple Remote Management tools
+      - name: Configure XFCE Session
+        shell: bash
         run: |
-          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+          set -e
 
-          if [ -x "$KICKSTART" ]; then
-            echo "kickstart found:"
-            echo "$KICKSTART"
-          else
-            echo "ERROR: kickstart was not found."
+          sudo tee /home/run/.xsession > /dev/null <<'EOF'
+          #!/bin/sh
+
+          # --------------------------------------------------------
+          # XFCE environment
+          # --------------------------------------------------------
+
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+
+          # XDG defaults
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+
+          # --------------------------------------------------------
+          # Do not inherit a stale D-Bus session from XRDP
+          # --------------------------------------------------------
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          # --------------------------------------------------------
+          # IMPORTANT:
+          # Use the official Xfce launcher.
+          #
+          # startxfce4 prepares the Xfce environment and then
+          # launches xfce4-session.
+          # --------------------------------------------------------
+
+          exec /usr/bin/startxfce4
+          EOF
+
+          sudo chown run:run /home/run/.xsession
+          sudo chmod 755 /home/run/.xsession
+
+          echo ""
+          echo "===== /home/run/.xsession ====="
+          sudo cat /home/run/.xsession
+
+
+      # ============================================================
+      # 6. CONFIGURE XRDP
+      # ============================================================
+      - name: Configure XRDP
+        shell: bash
+        run: |
+          set -e
+
+          sudo cp \
+            /etc/xrdp/startwm.sh \
+            /etc/xrdp/startwm.sh.original \
+            || true
+
+          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+          #!/bin/sh
+
+          # --------------------------------------------------------
+          # Clean inherited session variables
+          # --------------------------------------------------------
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          # --------------------------------------------------------
+          # XFCE environment
+          # --------------------------------------------------------
+
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+
+          # --------------------------------------------------------
+          # Load standard environment
+          # --------------------------------------------------------
+
+          if [ -r /etc/profile ]; then
+              . /etc/profile
+          fi
+
+          if [ -r "$HOME/.profile" ]; then
+              . "$HOME/.profile"
+          fi
+
+          # --------------------------------------------------------
+          # Make sure our XFCE environment is still present after
+          # loading profile files.
+          # --------------------------------------------------------
+
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+
+          # --------------------------------------------------------
+          # XRDP -> user's XFCE session
+          # --------------------------------------------------------
+
+          exec "$HOME/.xsession"
+          EOF
+
+          sudo chmod 755 /etc/xrdp/startwm.sh
+
+          echo ""
+          echo "===== /etc/xrdp/startwm.sh ====="
+          sudo cat /etc/xrdp/startwm.sh
+
+
+      # ============================================================
+      # 7. XRDP SSL
+      # ============================================================
+      - name: Configure XRDP SSL
+        shell: bash
+        run: |
+          set -e
+
+          sudo adduser xrdp ssl-cert || true
+
+          echo "XRDP SSL permissions configured."
+
+
+      # ============================================================
+      # 8. VERIFY XFCE COMMANDS
+      # ============================================================
+      - name: Verify XFCE Commands
+        shell: bash
+        run: |
+          set -e
+
+          echo ""
+          echo "=========================================="
+          echo "XFCE COMMAND CHECK"
+          echo "=========================================="
+
+          echo ""
+          echo "startxfce4:"
+          ls -l /usr/bin/startxfce4
+
+          echo ""
+          echo "xfce4-session:"
+          ls -l /usr/bin/xfce4-session
+
+          echo ""
+          echo "xfconfd:"
+          find /usr/lib -type f -name xfconfd -print 2>/dev/null || true
+
+          echo ""
+          echo "xfconf-query:"
+          ls -l /usr/bin/xfconf-query
+
+          echo ""
+          echo "XDG_CONFIG_DIRS:"
+          sudo -u run env \
+            XDG_CONFIG_DIRS=/etc:/etc/xdg \
+            bash -c 'printf "%s\n" "$XDG_CONFIG_DIRS"'
+
+
+      # ============================================================
+      # 9. VERIFY XFCE FAILSAFE CONFIG
+      # ============================================================
+      - name: Verify XFCE Failsafe Session
+        shell: bash
+        run: |
+          set -e
+
+          XFCE_SESSION_XML="/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml"
+
+          echo ""
+          echo "=========================================="
+          echo "XFCE FAILSAFE SESSION CHECK"
+          echo "=========================================="
+
+          if [ ! -f "$XFCE_SESSION_XML" ]; then
+            echo "::error::XFCE session configuration file is missing:"
+            echo "$XFCE_SESSION_XML"
             exit 1
           fi
 
+          echo "Configuration file:"
+          echo "$XFCE_SESSION_XML"
+
+          echo ""
+          echo "File:"
+          ls -l "$XFCE_SESSION_XML"
+
+          echo ""
+          echo "Failsafe section:"
+          grep -n -i -A 15 -B 5 "Failsafe" \
+            "$XFCE_SESSION_XML" \
+            || true
+
 
       # ============================================================
-      # 4. Configure Remote Management
+      # 10. RESTART XRDP
       # ============================================================
-      - name: Configure Remote Management
-        env:
-          RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
+      - name: Restart XRDP
+        shell: bash
         run: |
-          set +e
+          set -e
 
-          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+          sudo systemctl daemon-reload
 
+          sudo systemctl enable xrdp
+
+          sudo systemctl restart xrdp
+
+          sleep 3
+
+          echo ""
           echo "=========================================="
-          echo "     CONFIGURING REMOTE MANAGEMENT"
-          echo "=========================================="
-
-          sudo "$KICKSTART" \
-            -activate \
-            -configure \
-            -access -on \
-            -users run \
-            -privs -all \
-            -restart \
-            -agent
-
-          echo
-          echo "Remote Management configuration command completed."
-
-          sudo "$KICKSTART" \
-            -configure \
-            -access -on \
-            -users run \
-            -privs -all
-
-          echo
-          echo "Remote Management status:"
-          sudo "$KICKSTART" -configure -getstatus
-
-
-      # ============================================================
-      # 5. IMPORTANT:
-      #    Configure legacy VNC authentication
-      #
-      #    VNC_PASSWORD MUST be 8 characters or fewer.
-      # ============================================================
-      - name: Configure legacy VNC authentication
-        env:
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-        run: |
-          set +e
-
-          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
-
-          echo "=========================================="
-          echo "       CONFIGURING VNC AUTHENTICATION"
+          echo "XRDP STATUS"
           echo "=========================================="
 
-          if [ -z "$VNC_PASSWORD" ]; then
-            echo
-            echo "ERROR: VNC_PASSWORD GitHub secret is empty."
-            echo
-            echo "Create a GitHub Actions secret named:"
-            echo "VNC_PASSWORD"
-            echo
-            echo "Use an ASCII VNC password of 8 characters or fewer."
-            exit 1
-          fi
+          sudo systemctl --no-pager --full status xrdp || true
 
-          VNC_LENGTH=$(printf "%s" "$VNC_PASSWORD" | wc -c | tr -d ' ')
-
-          echo "VNC password length: ${VNC_LENGTH}"
-
-          if [ "$VNC_LENGTH" -gt 8 ]; then
-            echo
-            echo "ERROR: VNC_PASSWORD is longer than 8 characters."
-            echo "Use 8 characters or fewer."
-            exit 1
-          fi
-
-          echo
-          echo "Enabling legacy VNC connections..."
-
-          sudo "$KICKSTART" \
-            -configure \
-            -clientopts \
-            -setvnclegacy \
-            -vnclegacy yes
-
-          echo
-          echo "Setting VNC password..."
-
-          sudo "$KICKSTART" \
-            -configure \
-            -clientopts \
-            -setvncpw \
-            -vncpw "$VNC_PASSWORD"
-
-          echo
-          echo "VNC authentication configuration commands completed."
+          echo ""
+          echo "Port 3389:"
+          sudo ss -lntp | grep ':3389' || true
 
 
       # ============================================================
-      # 6. Restart Apple Remote Management agent
-      # ============================================================
-      - name: Restart Remote Management agent
-        run: |
-          set +e
-
-          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
-
-          echo "Restarting ARDAgent..."
-
-          sudo "$KICKSTART" \
-            -restart \
-            -agent
-
-          sleep 5
-
-          echo
-          echo "ARDAgent processes:"
-          ps aux | grep -i '[A]RDAgent' || true
-
-          echo
-          echo "Screen Sharing processes:"
-          ps aux | grep -i '[S]creenSharing' || true
-
-
-      # ============================================================
-      # 7. Install / connect Tailscale
+      # 11. CONNECT TAILSCALE
       # ============================================================
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
@@ -216,201 +391,212 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
           tags: tag:ci
-          version: latest
+          hostname: gh-runner-${{ github.run_id }}
 
 
       # ============================================================
-      # 8. Get Tailscale IP
+      # 12. GET TAILSCALE IP
       # ============================================================
-      - name: Get Tailscale address
-        id: tailscale_ip
+      - name: Get Tailscale IP
+        shell: bash
         run: |
           set -e
 
-          echo "=========================================="
-          echo "           TAILSCALE INFORMATION"
-          echo "=========================================="
+          sleep 3
 
-          tailscale status || true
+          TS_IP=$(tailscale ip -4)
 
-          echo
-          echo "Tailscale IPv4 addresses:"
-
-          TAILSCALE_IP=$(tailscale ip -4 | head -n 1)
-
-          if [ -z "$TAILSCALE_IP" ]; then
-            echo "ERROR: Could not obtain Tailscale IPv4 address."
+          if [ -z "$TS_IP" ]; then
+            echo "::error::Tailscale IPv4 address not found."
             exit 1
           fi
 
-          echo "$TAILSCALE_IP"
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-          echo "TAILSCALE_IP=$TAILSCALE_IP" >> "$GITHUB_OUTPUT"
-
-          echo
-          echo "Tailscale IPv4:"
-          echo "$TAILSCALE_IP"
+          echo ""
+          echo "=========================================="
+          echo "TAILSCALE IP"
+          echo "=========================================="
+          echo "$TS_IP"
 
 
       # ============================================================
-      # 9. Wait for Screen Sharing / VNC listener
+      # 13. FIREWALL
       # ============================================================
-      - name: Wait for VNC service
+      - name: Configure Firewall
+        shell: bash
         run: |
-          set +e
+          set -e
 
-          echo "=========================================="
-          echo "             VNC SERVICE TEST"
-          echo "=========================================="
+          sudo ufw allow \
+            from 100.64.0.0/10 \
+            to any \
+            port 3389 \
+            proto tcp
 
-          for i in {1..12}; do
+          sudo ufw --force enable
 
-            echo
-            echo "Attempt $i / 12"
-
-            if nc -z -w 3 127.0.0.1 5900; then
-              echo "TCP 5900 is OPEN."
-              break
-            else
-              echo "TCP 5900 is not ready yet."
-            fi
-
-            sleep 5
-          done
-
-          echo
-          echo "Port 5900:"
-          lsof -nP -iTCP:5900 -sTCP:LISTEN || true
+          echo ""
+          echo "===== UFW ====="
+          sudo ufw status verbose || true
 
 
       # ============================================================
-      # 10. Test the actual VNC protocol handshake
+      # 14. TEST RDP PORT
       # ============================================================
-      - name: Test VNC protocol handshake
+      - name: Verify RDP
+        shell: bash
         run: |
-          set +e
+          set -e
 
+          echo ""
           echo "=========================================="
-          echo "          VNC PROTOCOL HANDSHAKE"
+          echo "RDP TEST"
           echo "=========================================="
 
-          echo
-          echo "Connecting to localhost:5900..."
+          echo "Address: $TAILSCALE_IP"
 
-          RESULT=$(nc -v -w 5 127.0.0.1 5900 </dev/null 2>&1)
+          if timeout 10 bash -c \
+            "cat < /dev/null > /dev/tcp/$TAILSCALE_IP/3389" \
+            2>/dev/null
+          then
+            echo "RDP TCP port 3389: OK"
+          else
+            echo "::error::RDP TCP port 3389 is not reachable."
+            exit 1
+          fi
 
-          echo "$RESULT"
 
-          echo
-          echo "Attempting to read VNC banner..."
+      # ============================================================
+      # 15. LIVE SESSION LOGGER
+      # ============================================================
+      - name: Start Live Diagnostic Logger
+        shell: bash
+        run: |
+          set -e
+
+          sudo rm -f /tmp/xrdp-live.log
 
           (
-            sleep 1
-          ) | nc -v -w 5 127.0.0.1 5900 2>&1 | head -c 64 | od -An -tx1c || true
+            while true; do
 
-          echo
-          echo "Handshake test completed."
+              {
+                echo ""
+                echo "=================================================="
+                echo "TIME: $(date)"
+                echo "=================================================="
+
+                echo ""
+                echo "===== XRDP SESMAN ====="
+                sudo tail -60 /var/log/xrdp-sesman.log \
+                  2>/dev/null || true
+
+                echo ""
+                echo "===== XRDP ====="
+                sudo tail -60 /var/log/xrdp.log \
+                  2>/dev/null || true
+
+                echo ""
+                echo "===== USER FILES ====="
+                sudo find /home/run -maxdepth 3 -type f \
+                  \( \
+                    -name ".xsession-errors" \
+                    -o -name "*xsession*.log" \
+                    -o -name "*.xorgxrdp*.log" \
+                  \) \
+                  -print 2>/dev/null || true
+
+                echo ""
+                echo "===== .xsession-errors ====="
+                sudo tail -100 /home/run/.xsession-errors \
+                  2>/dev/null || true
+
+                echo ""
+                echo "===== XORG XRDP LOG ====="
+                sudo find /home/run -maxdepth 2 \
+                  -name ".xorgxrdp.*.log" \
+                  -exec tail -60 {} \; \
+                  2>/dev/null || true
+
+                echo ""
+                echo "===== XFCE PROCESSES ====="
+                pgrep -a -u run \
+                  'xfce|xfconfd|xfwm|xfdesktop|xfsettings|dbus' \
+                  2>/dev/null || true
+
+              } >> /tmp/xrdp-live.log 2>&1
+
+              sleep 10
+
+            done
+          ) &
+
+          echo $! | sudo tee /tmp/xrdp-diagnostic.pid
+
+          echo "Diagnostic logger started."
 
 
       # ============================================================
-      # 11. Full Screen Sharing diagnostics
+      # 16. CONNECTION INFORMATION
       # ============================================================
-      - name: Screen Sharing diagnostics
-        env:
-          TAILSCALE_IP: ${{ steps.tailscale_ip.outputs.TAILSCALE_IP }}
+      - name: Show RDP Information
+        shell: bash
         run: |
-          echo
-          echo "=========================================="
-          echo "       SCREEN SHARING DIAGNOSTICS"
-          echo "=========================================="
-
-          echo
-          echo "----- Port 5900 -----"
-          sudo lsof -nP -iTCP:5900 -sTCP:LISTEN || true
-
-          echo
-          echo "----- Port 3283 -----"
-          sudo lsof -nP -iTCP:3283 -sTCP:LISTEN || true
-
-          echo
-          echo "----- Remote Desktop processes -----"
-          ps aux | grep -Ei \
-            '[A]RDAgent|[S]creenSharing|[S]creenSharingSubscriber|[r]emotemanagementd' \
-            || true
-
-          echo
-          echo "----- Remote Management launch services -----"
-          launchctl list | grep -Ei \
-            'Remote|remote|screen|Screen|ARD|ard' \
-            || true
-
-          echo
-          echo "----- Network interfaces -----"
-          ifconfig
-
-          echo
-          echo "----- Tailscale IP -----"
+          echo ""
+          echo "=================================================="
+          echo "REMOTE DESKTOP READY"
+          echo "=================================================="
+          echo ""
+          echo "Computer : $TAILSCALE_IP"
+          echo "Username : run"
+          echo "Port     : 3389"
+          echo "Desktop  : XFCE"
+          echo ""
+          echo "Password:"
+          echo "Use the value stored in GitHub secret RUN_PASSWORD"
+          echo ""
+          echo "Open Windows Remote Desktop and connect to:"
+          echo ""
           echo "$TAILSCALE_IP"
-
-          echo
-          echo "----- Test localhost:5900 -----"
-          nc -zv -w 5 127.0.0.1 5900 || true
-
-          echo
-          echo "----- Test Tailscale IP:5900 -----"
-          nc -zv -w 5 "$TAILSCALE_IP" 5900 || true
+          echo ""
+          echo "=================================================="
 
 
       # ============================================================
-      # 12. Print connection information
+      # 17. KEEP RUNNER ALIVE
       # ============================================================
-      - name: Print connection information
-        env:
-          TAILSCALE_IP: ${{ steps.tailscale_ip.outputs.TAILSCALE_IP }}
+      - name: Maintain Connection
+        shell: bash
         run: |
-          echo
-          echo "============================================================"
-          echo "                 REMOTE MAC INFORMATION"
-          echo "============================================================"
-          echo
-          echo "VNC address:"
-          echo
-          echo "    $TAILSCALE_IP:5900"
-          echo
-          echo "Use your VNC client with:"
-          echo
-          echo "    Server: $TAILSCALE_IP"
-          echo "    Port:   5900"
-          echo
-          echo "VNC authentication:"
-          echo "    Password = GitHub secret VNC_PASSWORD"
-          echo
-          echo "Remote desktop account:"
-          echo "    Username: run"
-          echo "    Password: GitHub secret RUN_PASSWORD"
-          echo
-          echo "============================================================"
-          echo
-          echo "IMPORTANT:"
-          echo "VNC_PASSWORD is separate from RUN_PASSWORD."
-          echo "============================================================"
-
-
-      # ============================================================
-      # 13. Keep GitHub macOS runner alive
-      # ============================================================
-      - name: Keep Mac online
-        run: |
-          echo
-          echo "=========================================="
-          echo "       MAC IS READY FOR REMOTE ACCESS"
-          echo "=========================================="
-          echo
-          echo "The GitHub-hosted Mac will remain running"
-          echo "until the workflow timeout is reached."
-          echo
+          echo ""
+          echo "=================================================="
+          echo "RUNNER ACTIVE"
+          echo "=================================================="
 
           while true; do
-            echo "[$(date)] Mac remote desktop still running..."
+
+            echo ""
+            echo "[$(date)] Runner active."
+
+            echo "----- XRDP session -----"
+            sudo tail -25 /var/log/xrdp-sesman.log \
+              2>/dev/null || true
+
+            echo ""
+            echo "----- XFCE errors -----"
+            sudo tail -30 /home/run/.xsession-errors \
+              2>/dev/null || true
+
+            echo ""
+            echo "----- XFCE processes -----"
+            pgrep -a -u run \
+              'xfce|xfconfd|xfwm|xfdesktop|xfsettings' \
+              2>/dev/null || true
+
+            echo ""
+            echo "----- RDP port -----"
+            sudo ss -lntp | grep ':3389' || true
+
             sleep 60
+
           done
