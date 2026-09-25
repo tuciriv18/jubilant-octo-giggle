@@ -7,142 +7,208 @@ permissions:
   contents: read
 
 jobs:
-  macos-remote:
+  macos-rdp:
     runs-on: macos-15-intel
     timeout-minutes: 360
 
     steps:
 
       # ============================================================
-      # SYSTEM INFORMATION
+      # 1. Basic macOS information
       # ============================================================
-      - name: Show macOS Information
+      - name: Show macOS information
         run: |
           echo "=========================================="
-          echo "          macOS RUNNER INFORMATION"
+          echo "          macOS REMOTE DESKTOP"
           echo "=========================================="
 
+          echo "macOS:"
           sw_vers
 
-          echo ""
-          echo "Architecture:"
-          uname -m
+          echo
+          echo "Kernel:"
+          uname -a
 
-          echo ""
-          echo "Hardware:"
-          system_profiler SPHardwareDataType | head -40
-
-          echo ""
+          echo
           echo "Current user:"
           whoami
 
-          echo ""
-          echo "Logged-in users:"
-          who
-
-          echo "=========================================="
+          echo
+          echo "Console user:"
+          stat -f '%Su' /dev/console || true
 
 
       # ============================================================
-      # CREATE USER
+      # 2. Create remote desktop user
       # ============================================================
-      - name: Create Remote User
+      - name: Create remote desktop user
         env:
           RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
         run: |
-
-          if [ -z "$RUN_PASSWORD" ]; then
-            echo "::error::RUN_PASSWORD secret is not configured."
-            exit 1
-          fi
-
-          echo "Checking for user 'run'..."
+          set -e
 
           if id run >/dev/null 2>&1; then
-            echo "User already exists."
+            echo "User 'run' already exists."
           else
-            echo "Creating user..."
+            echo "Creating user 'run'..."
 
             sudo sysadminctl \
               -addUser run \
-              -fullName "Remote User" \
+              -fullName "Remote Desktop User" \
               -password "$RUN_PASSWORD"
           fi
 
-          echo "Adding user to administrators..."
+          sudo dseditgroup -o edit -a run -t user admin || true
 
-          sudo dseditgroup \
-            -o edit \
-            -a run \
-            -t user \
-            admin
-
-          echo ""
+          echo
           echo "User information:"
           id run
 
-          echo ""
-          echo "User creation complete."
+
+      # ============================================================
+      # 3. Locate Apple's Remote Management kickstart utility
+      # ============================================================
+      - name: Locate Apple Remote Management tools
+        run: |
+          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
+          if [ -x "$KICKSTART" ]; then
+            echo "kickstart found:"
+            echo "$KICKSTART"
+          else
+            echo "ERROR: kickstart was not found."
+            exit 1
+          fi
 
 
       # ============================================================
-      # PREPARE MACOS REMOTE MANAGEMENT
+      # 4. Configure Remote Management
       # ============================================================
-      - name: Configure macOS Remote Management
+      - name: Configure Remote Management
         env:
           RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
         run: |
+          set +e
 
           KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
 
           echo "=========================================="
-          echo "       REMOTE MANAGEMENT CONFIG"
+          echo "     CONFIGURING REMOTE MANAGEMENT"
           echo "=========================================="
 
-          if [ ! -x "$KICKSTART" ]; then
-            echo "::warning::Apple Remote Management kickstart utility was not found."
-          else
+          sudo "$KICKSTART" \
+            -activate \
+            -configure \
+            -access -on \
+            -users run \
+            -privs -all \
+            -restart \
+            -agent
 
-            echo "kickstart found:"
-            echo "$KICKSTART"
+          echo
+          echo "Remote Management configuration command completed."
 
-            echo ""
-            echo "Attempting to activate Remote Management..."
+          sudo "$KICKSTART" \
+            -configure \
+            -access -on \
+            -users run \
+            -privs -all
 
-            sudo "$KICKSTART" \
-              -activate \
-              -configure \
-              -access -on \
-              -users run \
-              -privs -all \
-              -restart \
-              -agent || true
+          echo
+          echo "Remote Management status:"
+          sudo "$KICKSTART" -configure -getstatus
 
+
+      # ============================================================
+      # 5. IMPORTANT:
+      #    Configure legacy VNC authentication
+      #
+      #    VNC_PASSWORD MUST be 8 characters or fewer.
+      # ============================================================
+      - name: Configure legacy VNC authentication
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          set +e
+
+          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
+          echo "=========================================="
+          echo "       CONFIGURING VNC AUTHENTICATION"
+          echo "=========================================="
+
+          if [ -z "$VNC_PASSWORD" ]; then
+            echo
+            echo "ERROR: VNC_PASSWORD GitHub secret is empty."
+            echo
+            echo "Create a GitHub Actions secret named:"
+            echo "VNC_PASSWORD"
+            echo
+            echo "Use an ASCII VNC password of 8 characters or fewer."
+            exit 1
           fi
 
-          echo ""
-          echo "Checking ARDAgent..."
+          VNC_LENGTH=$(printf "%s" "$VNC_PASSWORD" | wc -c | tr -d ' ')
 
-          sudo launchctl print system/com.apple.RemoteDesktop.agent \
-            2>/dev/null || true
+          echo "VNC password length: ${VNC_LENGTH}"
 
-          echo ""
-          echo "Checking port 5900..."
+          if [ "$VNC_LENGTH" -gt 8 ]; then
+            echo
+            echo "ERROR: VNC_PASSWORD is longer than 8 characters."
+            echo "Use 8 characters or fewer."
+            exit 1
+          fi
 
-          sudo lsof -nP -iTCP:5900 -sTCP:LISTEN \
-            2>/dev/null || true
+          echo
+          echo "Enabling legacy VNC connections..."
+
+          sudo "$KICKSTART" \
+            -configure \
+            -clientopts \
+            -setvnclegacy \
+            -vnclegacy yes
+
+          echo
+          echo "Setting VNC password..."
+
+          sudo "$KICKSTART" \
+            -configure \
+            -clientopts \
+            -setvncpw \
+            -vncpw "$VNC_PASSWORD"
+
+          echo
+          echo "VNC authentication configuration commands completed."
 
 
       # ============================================================
-      # TAILSCALE
+      # 6. Restart Apple Remote Management agent
       # ============================================================
-      #
-      # IMPORTANT:
-      # Your existing secret is:
-      #
-      #   TS_OAUTH_CLIENT_ID
-      #   TS_OAUTH_CLIENT_SECRET
-      #
+      - name: Restart Remote Management agent
+        run: |
+          set +e
+
+          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
+          echo "Restarting ARDAgent..."
+
+          sudo "$KICKSTART" \
+            -restart \
+            -agent
+
+          sleep 5
+
+          echo
+          echo "ARDAgent processes:"
+          ps aux | grep -i '[A]RDAgent' || true
+
+          echo
+          echo "Screen Sharing processes:"
+          ps aux | grep -i '[S]creenSharing' || true
+
+
+      # ============================================================
+      # 7. Install / connect Tailscale
       # ============================================================
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
@@ -154,234 +220,197 @@ jobs:
 
 
       # ============================================================
-      # GET TAILSCALE IP
+      # 8. Get Tailscale IP
       # ============================================================
-      - name: Get Tailscale IP
+      - name: Get Tailscale address
+        id: tailscale_ip
         run: |
+          set -e
 
-          echo "Waiting for Tailscale..."
-
-          sleep 5
-
-          TS_IP=""
-
-          for i in {1..10}; do
-
-            TS_IP=$(tailscale ip -4 2>/dev/null || true)
-
-            if [ -n "$TS_IP" ]; then
-              break
-            fi
-
-            echo "Tailscale IP not available yet..."
-            sleep 3
-
-          done
-
-          if [ -z "$TS_IP" ]; then
-            echo "::error::Unable to obtain Tailscale IPv4 address."
-            tailscale status || true
-            exit 1
-          fi
-
-          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
-
-          echo ""
           echo "=========================================="
-          echo "          TAILSCALE CONNECTED"
+          echo "           TAILSCALE INFORMATION"
           echo "=========================================="
-          echo "IP: $TS_IP"
-          echo "=========================================="
-
-
-      # ============================================================
-      # CHECK TAILSCALE
-      # ============================================================
-      - name: Verify Tailscale
-        run: |
-
-          echo "===== TAILSCALE STATUS ====="
 
           tailscale status || true
 
-          echo ""
-          echo "===== TAILSCALE IP ====="
+          echo
+          echo "Tailscale IPv4 addresses:"
 
-          tailscale ip -4 || true
+          TAILSCALE_IP=$(tailscale ip -4 | head -n 1)
 
-          echo ""
-          echo "===== TAILSCALE VERSION ====="
+          if [ -z "$TAILSCALE_IP" ]; then
+            echo "ERROR: Could not obtain Tailscale IPv4 address."
+            exit 1
+          fi
 
-          tailscale version || true
+          echo "$TAILSCALE_IP"
+
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> "$GITHUB_OUTPUT"
+
+          echo
+          echo "Tailscale IPv4:"
+          echo "$TAILSCALE_IP"
 
 
       # ============================================================
-      # CHECK MACOS REMOTE DESKTOP SERVICES
+      # 9. Wait for Screen Sharing / VNC listener
       # ============================================================
-      - name: Diagnose Screen Sharing
+      - name: Wait for VNC service
         run: |
+          set +e
 
-          echo ""
+          echo "=========================================="
+          echo "             VNC SERVICE TEST"
+          echo "=========================================="
+
+          for i in {1..12}; do
+
+            echo
+            echo "Attempt $i / 12"
+
+            if nc -z -w 3 127.0.0.1 5900; then
+              echo "TCP 5900 is OPEN."
+              break
+            else
+              echo "TCP 5900 is not ready yet."
+            fi
+
+            sleep 5
+          done
+
+          echo
+          echo "Port 5900:"
+          lsof -nP -iTCP:5900 -sTCP:LISTEN || true
+
+
+      # ============================================================
+      # 10. Test the actual VNC protocol handshake
+      # ============================================================
+      - name: Test VNC protocol handshake
+        run: |
+          set +e
+
+          echo "=========================================="
+          echo "          VNC PROTOCOL HANDSHAKE"
+          echo "=========================================="
+
+          echo
+          echo "Connecting to localhost:5900..."
+
+          RESULT=$(nc -v -w 5 127.0.0.1 5900 </dev/null 2>&1)
+
+          echo "$RESULT"
+
+          echo
+          echo "Attempting to read VNC banner..."
+
+          (
+            sleep 1
+          ) | nc -v -w 5 127.0.0.1 5900 2>&1 | head -c 64 | od -An -tx1c || true
+
+          echo
+          echo "Handshake test completed."
+
+
+      # ============================================================
+      # 11. Full Screen Sharing diagnostics
+      # ============================================================
+      - name: Screen Sharing diagnostics
+        env:
+          TAILSCALE_IP: ${{ steps.tailscale_ip.outputs.TAILSCALE_IP }}
+        run: |
+          echo
           echo "=========================================="
           echo "       SCREEN SHARING DIAGNOSTICS"
           echo "=========================================="
 
-          echo ""
+          echo
           echo "----- Port 5900 -----"
+          sudo lsof -nP -iTCP:5900 -sTCP:LISTEN || true
 
-          sudo lsof -nP -iTCP:5900 \
-            -sTCP:LISTEN || true
-
-          echo ""
+          echo
           echo "----- Port 3283 -----"
+          sudo lsof -nP -iTCP:3283 -sTCP:LISTEN || true
 
-          sudo lsof -nP -iTCP:3283 \
-            -sTCP:LISTEN || true
-
-          echo ""
+          echo
           echo "----- Remote Desktop processes -----"
-
           ps aux | grep -Ei \
-            "ARDAgent|screensharing|remote.*desktop" \
-            | grep -v grep || true
-
-          echo ""
-          echo "----- Remote Management launch services -----"
-
-          sudo launchctl list \
-            | grep -Ei \
-            "Remote|Screen|ARD" \
+            '[A]RDAgent|[S]creenSharing|[S]creenSharingSubscriber|[r]emotemanagementd' \
             || true
 
-          echo ""
+          echo
+          echo "----- Remote Management launch services -----"
+          launchctl list | grep -Ei \
+            'Remote|remote|screen|Screen|ARD|ard' \
+            || true
+
+          echo
           echo "----- Network interfaces -----"
+          ifconfig
 
-          ifconfig | head -80
-
-          echo ""
-          echo "=========================================="
-
-
-      # ============================================================
-      # TEST LOCAL VNC
-      # ============================================================
-      - name: Test Local VNC
-        run: |
-
-          echo "Testing localhost:5900..."
-
-          if nc -z -G 3 127.0.0.1 5900 2>/dev/null; then
-
-            echo ""
-            echo "=========================================="
-            echo "       VNC PORT IS LISTENING"
-            echo "=========================================="
-
-          else
-
-            echo ""
-            echo "::warning::Nothing is listening on TCP 5900."
-
-            echo ""
-            echo "This means macOS Screen Sharing is not"
-            echo "currently exposing a VNC server."
-
-          fi
-
-
-      # ============================================================
-      # TEST TAILSCALE VNC
-      # ============================================================
-      - name: Test Tailscale VNC
-        run: |
-
-          echo "Testing:"
-          echo "$TAILSCALE_IP:5900"
-
-          if nc -z -G 5 "$TAILSCALE_IP" 5900 2>/dev/null; then
-
-            echo ""
-            echo "=========================================="
-            echo "       TAILSCALE VNC PORT OPEN"
-            echo "=========================================="
-
-          else
-
-            echo ""
-            echo "::warning::TCP 5900 is not reachable through Tailscale."
-
-          fi
-
-
-      # ============================================================
-      # DISPLAY ACCESS INFORMATION
-      # ============================================================
-      - name: Show Access Information
-        run: |
-
-          echo ""
-          echo ""
-          echo "================================================"
-          echo "             MACOS RUNNER ACCESS"
-          echo "================================================"
-          echo ""
-
-          echo "macOS:"
-          sw_vers -productVersion
-
-          echo ""
-          echo "Architecture:"
-          uname -m
-
-          echo ""
-          echo "Tailscale IP:"
+          echo
+          echo "----- Tailscale IP -----"
           echo "$TAILSCALE_IP"
 
-          echo ""
-          echo "VNC address:"
-          echo "$TAILSCALE_IP:5900"
+          echo
+          echo "----- Test localhost:5900 -----"
+          nc -zv -w 5 127.0.0.1 5900 || true
 
-          echo ""
-          echo "Username:"
-          echo "run"
-
-          echo ""
-          echo "Password:"
-          echo "RUN_PASSWORD secret"
-
-          echo ""
-          echo "================================================"
-          echo ""
-
-          echo "IMPORTANT:"
-          echo "This workflow cannot bypass macOS privacy"
-          echo "authorization for Screen Recording / control."
-          echo ""
-
-          echo "If TCP 5900 is listening, try your VNC client."
-          echo "If TCP 5900 is NOT listening, Screen Sharing"
-          echo "has not been enabled by the hosted runner."
-          echo ""
-
-          echo "================================================"
+          echo
+          echo "----- Test Tailscale IP:5900 -----"
+          nc -zv -w 5 "$TAILSCALE_IP" 5900 || true
 
 
       # ============================================================
-      # KEEP RUNNER ALIVE
+      # 12. Print connection information
       # ============================================================
-      - name: Keep macOS Runner Alive
+      - name: Print connection information
+        env:
+          TAILSCALE_IP: ${{ steps.tailscale_ip.outputs.TAILSCALE_IP }}
         run: |
+          echo
+          echo "============================================================"
+          echo "                 REMOTE MAC INFORMATION"
+          echo "============================================================"
+          echo
+          echo "VNC address:"
+          echo
+          echo "    $TAILSCALE_IP:5900"
+          echo
+          echo "Use your VNC client with:"
+          echo
+          echo "    Server: $TAILSCALE_IP"
+          echo "    Port:   5900"
+          echo
+          echo "VNC authentication:"
+          echo "    Password = GitHub secret VNC_PASSWORD"
+          echo
+          echo "Remote desktop account:"
+          echo "    Username: run"
+          echo "    Password: GitHub secret RUN_PASSWORD"
+          echo
+          echo "============================================================"
+          echo
+          echo "IMPORTANT:"
+          echo "VNC_PASSWORD is separate from RUN_PASSWORD."
+          echo "============================================================"
 
-          echo ""
+
+      # ============================================================
+      # 13. Keep GitHub macOS runner alive
+      # ============================================================
+      - name: Keep Mac online
+        run: |
+          echo
           echo "=========================================="
-          echo "       MACOS RUNNER IS ACTIVE"
+          echo "       MAC IS READY FOR REMOTE ACCESS"
           echo "=========================================="
-          echo ""
+          echo
+          echo "The GitHub-hosted Mac will remain running"
+          echo "until the workflow timeout is reached."
+          echo
 
           while true; do
-
-            echo "[$(date)] macOS runner active."
-
-            sleep 300
-
+            echo "[$(date)] Mac remote desktop still running..."
+            sleep 60
           done
