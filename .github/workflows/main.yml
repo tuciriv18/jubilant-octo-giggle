@@ -1,161 +1,117 @@
-name: Linux Build
+name: macOS Remote Desktop
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-build:
-    runs-on: ubuntu-latest
+  macos-remote:
+    runs-on: macos-15-intel
     timeout-minutes: 360
 
     steps:
 
       # ============================================================
-      # INSTALL CINNAMON + XRDP
+      # SYSTEM INFORMATION
       # ============================================================
-      - name: Install Cinnamon Desktop and XRDP
+      - name: Show macOS Information
         run: |
-          sudo apt-get update
+          echo "=========================================="
+          echo "           macOS RUNNER"
+          echo "=========================================="
 
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            cinnamon-desktop-environment \
-            cinnamon-session \
-            xrdp \
-            xorgxrdp \
-            dbus-x11
+          sw_vers
+          echo ""
 
-          echo "===== Installed Cinnamon ====="
-          cinnamon-session --version || true
+          echo "Architecture:"
+          uname -m
 
-          echo "===== Available X Sessions ====="
-          ls -la /usr/share/xsessions/ || true
+          echo ""
+          echo "Computer:"
+          system_profiler SPHardwareDataType | head -30
+
+          echo ""
+          echo "=========================================="
 
 
       # ============================================================
-      # CREATE USER
+      # CREATE REMOTE USER
       # ============================================================
-      - name: Create User with Secret Password
+      - name: Create Remote Desktop User
         env:
           RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
         run: |
+
           if [ -z "$RUN_PASSWORD" ]; then
             echo "::error::RUN_PASSWORD secret is not set."
-            echo "Add it under:"
-            echo "Repository Settings > Secrets and variables > Actions"
+            echo ""
+            echo "Create this repository secret:"
+            echo "Settings > Secrets and variables > Actions"
+            echo "RUN_PASSWORD"
             exit 1
           fi
 
-          sudo useradd -m -s /bin/bash run
+          echo "Creating macOS user..."
 
-          echo "run:$RUN_PASSWORD" | sudo chpasswd
+          if id run >/dev/null 2>&1; then
+            echo "User 'run' already exists."
+          else
+            sudo sysadminctl \
+              -addUser run \
+              -fullName "Remote User" \
+              -password "$RUN_PASSWORD"
+          fi
 
-          sudo usermod -aG sudo run
+          sudo dseditgroup -o edit \
+            -a run \
+            -t user \
+            admin
 
-          echo "User created successfully."
+          echo "Remote user created."
 
 
       # ============================================================
-      # CONFIGURE CINNAMON + XRDP
+      # ENABLE MACOS REMOTE MANAGEMENT / SCREEN SHARING
       # ============================================================
-      - name: Configure Cinnamon XRDP Session
+      - name: Enable macOS Screen Sharing
+        env:
+          RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
         run: |
 
-          echo "===== Cinnamon session files ====="
-          ls -la /usr/share/xsessions/ || true
+          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
 
-          echo "===== Cinnamon executables ====="
-          command -v cinnamon-session || true
-          command -v cinnamon || true
-
-
-          # --------------------------------------------------------
-          # User session
-          # --------------------------------------------------------
-          sudo tee /home/run/.xsession > /dev/null <<'EOF'
-          #!/bin/sh
-
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-
-          export XDG_CURRENT_DESKTOP=X-Cinnamon
-          export XDG_SESSION_DESKTOP=cinnamon
-
-          exec /usr/bin/cinnamon-session
-          EOF
-
-          sudo chown run:run /home/run/.xsession
-          sudo chmod 755 /home/run/.xsession
-
-
-          # --------------------------------------------------------
-          # XRDP startup script
-          # --------------------------------------------------------
-          sudo cp /etc/xrdp/startwm.sh \
-            /etc/xrdp/startwm.sh.backup
-
-          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
-          #!/bin/sh
-
-          if [ -r /etc/profile ]; then
-              . /etc/profile
+          if [ ! -x "$KICKSTART" ]; then
+            echo "::error::macOS Remote Management kickstart utility not found."
+            exit 1
           fi
 
-          if [ -r "$HOME/.profile" ]; then
-              . "$HOME/.profile"
-          fi
+          echo "Enabling macOS Remote Management..."
 
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
+          sudo "$KICKSTART" \
+            -activate \
+            -configure \
+            -access -on \
+            -clientopts \
+            -setvnclegacy -vnclegacy yes \
+            -setvncpw \
+            -vncpw "$RUN_PASSWORD" \
+            -restart \
+            -agent \
+            -privs -all
 
-          export XDG_CURRENT_DESKTOP=X-Cinnamon
-          export XDG_SESSION_DESKTOP=cinnamon
-
-          export XDG_CONFIG_DIRS=/etc/xdg/xdg-cinnamon:/etc/xdg:$XDG_CONFIG_DIRS
-
-          exec /usr/bin/cinnamon-session
-          EOF
-
-          sudo chmod 755 /etc/xrdp/startwm.sh
-
-
-          # --------------------------------------------------------
-          # XRDP certificate permissions
-          # --------------------------------------------------------
-          sudo adduser xrdp ssl-cert || true
-
-
-          # --------------------------------------------------------
-          # Restart XRDP
-          # --------------------------------------------------------
-          sudo systemctl enable xrdp
-
-          sudo systemctl restart xrdp
-
-          sudo systemctl restart xrdp-sesman || true
-
-
-          # --------------------------------------------------------
-          # Show XRDP status
-          # --------------------------------------------------------
-          echo "===== XRDP STATUS ====="
-
-          sudo systemctl --no-pager status xrdp || true
-
-          echo "===== XRDP LISTENING PORT ====="
-
-          sudo ss -lntp | grep 3389 || true
+          echo "Screen Sharing / VNC configuration completed."
 
 
       # ============================================================
-      # CONNECT TAILSCALE
+      # CONNECT TO TAILSCALE
       # ============================================================
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          hostname: gh-runner-${{ github.run_id }}
+          version: latest
+          log-mode: normal
 
 
       # ============================================================
@@ -163,104 +119,138 @@ jobs:
       # ============================================================
       - name: Get Tailscale IP
         run: |
+
+          sleep 5
+
           TS_IP=$(tailscale ip -4)
 
           if [ -z "$TS_IP" ]; then
-            echo "::error::Could not get Tailscale IPv4 address."
+            echo "::error::Unable to obtain Tailscale IPv4 address."
             exit 1
           fi
 
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
+          echo ""
+          echo "=========================================="
+          echo "        TAILSCALE CONNECTION"
+          echo "=========================================="
           echo "Tailscale IPv4: $TS_IP"
+          echo "=========================================="
 
 
       # ============================================================
-      # FIREWALL
+      # CHECK REMOTE MANAGEMENT
       # ============================================================
-      - name: Configure Firewall
+      - name: Verify Remote Management
         run: |
 
-          sudo ufw allow from 100.64.0.0/10 \
-            to any port 3389 \
-            proto tcp
+          echo "Checking Remote Management..."
 
-          sudo ufw --force enable
+          sudo launchctl list | grep -i ARD || true
 
-          echo "===== FIREWALL ====="
-          sudo ufw status verbose
+          echo ""
+          echo "Checking listening ports..."
+
+          sudo lsof -nP -iTCP -sTCP:LISTEN | \
+            grep -E '5900|3283' || true
+
+          echo ""
+          echo "Tailscale status:"
+          sudo tailscale status || true
 
 
       # ============================================================
-      # VERIFY XRDP
+      # TEST VNC PORT
       # ============================================================
-      - name: Verify RDP Accessibility
+      - name: Verify VNC Port
         run: |
 
-          echo "Checking RDP on:"
-          echo "$TAILSCALE_IP:3389"
+          echo "Checking VNC port 5900..."
 
-          sleep 5
+          for i in {1..10}; do
 
-          if timeout 10 bash -c \
-            "cat < /dev/null > /dev/tcp/$TAILSCALE_IP/3389" \
-            2>/dev/null
-          then
-            echo "===================================="
-            echo "RDP TCP CONNECTION SUCCESSFUL"
-            echo "===================================="
-          else
-            echo "::error::TCP connection to RDP port 3389 failed."
+            if nc -z -G 3 "$TAILSCALE_IP" 5900 2>/dev/null; then
+              echo ""
+              echo "=========================================="
+              echo "       VNC PORT IS ACCESSIBLE"
+              echo "=========================================="
+              echo ""
+              echo "Tailscale IP:"
+              echo "$TAILSCALE_IP"
+              echo ""
+              echo "VNC:"
+              echo "$TAILSCALE_IP:5900"
+              echo ""
+              echo "=========================================="
+              exit 0
+            fi
 
-            echo "===== XRDP STATUS ====="
-            sudo systemctl --no-pager status xrdp || true
+            echo "VNC not ready yet... attempt $i/10"
+            sleep 3
 
-            echo "===== XRDP LOG ====="
-            sudo journalctl -u xrdp \
-              --no-pager \
-              -n 100 || true
+          done
 
-            echo "===== XRDP SESMAN LOG ====="
-            sudo journalctl -u xrdp-sesman \
-              --no-pager \
-              -n 100 || true
-
-            exit 1
-          fi
+          echo ""
+          echo "::warning::VNC port could not be verified from the runner itself."
+          echo "The macOS Screen Sharing service may still be active."
 
 
       # ============================================================
       # DISPLAY ACCESS INFORMATION
       # ============================================================
-      - name: Show Access Information
+      - name: Show Remote Desktop Information
+        run: |
+
+          echo ""
+          echo ""
+          echo "================================================"
+          echo "              MACOS REMOTE DESKTOP"
+          echo "================================================"
+          echo ""
+          echo "macOS:"
+          sw_vers -productVersion
+          echo ""
+          echo "Architecture:"
+          uname -m
+          echo ""
+          echo "Tailscale IP:"
+          echo "$TAILSCALE_IP"
+          echo ""
+          echo "VNC address:"
+          echo "$TAILSCALE_IP:5900"
+          echo ""
+          echo "Username:"
+          echo "run"
+          echo ""
+          echo "Password:"
+          echo "The value stored in RUN_PASSWORD"
+          echo ""
+          echo "================================================"
+          echo ""
+          echo "From Windows, use a VNC client and connect to:"
+          echo ""
+          echo "    $TAILSCALE_IP:5900"
+          echo ""
+          echo "================================================"
+
+
+      # ============================================================
+      # KEEP MACOS RUNNER ALIVE
+      # ============================================================
+      - name: Keep macOS Runner Alive
         run: |
 
           echo ""
           echo "=========================================="
-          echo "          REMOTE DESKTOP ACCESS"
+          echo "      MACOS RUNNER IS ACTIVE"
           echo "=========================================="
           echo ""
-          echo "Address : $TAILSCALE_IP"
-          echo "Port    : 3389"
-          echo "Username: run"
-          echo "Password: RUN_PASSWORD secret"
-          echo "Desktop : Cinnamon"
-          echo ""
-          echo "Windows Remote Desktop:"
-          echo ""
-          echo "    $TAILSCALE_IP"
-          echo ""
-          echo "=========================================="
-          echo ""
-
-
-      # ============================================================
-      # KEEP RUNNER ALIVE
-      # ============================================================
-      - name: Maintain Connection
-        run: |
 
           while true; do
-            echo "[$(date)] Cinnamon XRDP runner active..."
+
+            echo "[$(date)] macOS remote desktop active."
+
             sleep 300
+
           done
