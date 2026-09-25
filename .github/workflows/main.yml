@@ -6,9 +6,14 @@ on:
 jobs:
   secure-build:
     runs-on: ubuntu-latest
+
+    # GitHub-hosted runners have a maximum job duration.
     timeout-minutes: 360
 
     steps:
+      # ------------------------------------------------------------
+      # Install XFCE + XRDP + Xorg backend + D-Bus
+      # ------------------------------------------------------------
       - name: Install Desktop Environment and XRDP
         shell: bash
         run: |
@@ -19,20 +24,28 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xfce4 \
             xfce4-goodies \
+            xfce4-session \
+            xfce4-settings \
+            xfconf \
             xrdp \
             xorgxrdp \
+            dbus \
             dbus-x11 \
-            dbus
+            dbus-user-session
 
-      - name: Create User
+      # ------------------------------------------------------------
+      # Create RDP user
+      # ------------------------------------------------------------
+      - name: Create RDP User
+        shell: bash
         env:
           RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
-        shell: bash
         run: |
           set -e
 
           if [ -z "$RUN_PASSWORD" ]; then
             echo "::error::RUN_PASSWORD secret is not set."
+            echo "Add RUN_PASSWORD under Settings > Secrets and variables > Actions."
             exit 1
           fi
 
@@ -43,35 +56,54 @@ jobs:
           fi
 
           echo "run:$RUN_PASSWORD" | sudo chpasswd
+
           sudo usermod -aG sudo run
 
+          sudo chown -R run:run /home/run
+
+      # ------------------------------------------------------------
+      # Configure XFCE/XRDP
+      # ------------------------------------------------------------
       - name: Configure XFCE and XRDP
         shell: bash
         run: |
           set -eux
 
-          # Clean any previous XFCE session state
+          # Make sure required packages are present.
+          sudo apt-get install -y \
+            xfconf \
+            xfce4-session \
+            xfce4-settings \
+            dbus \
+            dbus-x11 \
+            dbus-user-session \
+            xorgxrdp
+
+          # Remove stale XFCE session information.
           sudo -u run rm -rf /home/run/.cache/sessions
-          sudo -u run rm -rf /home/run/.config/xfce4/xfconf
+          sudo -u run rm -rf /home/run/.config/xfce4-session
 
-          # Make sure the user's home directory is owned correctly
-          sudo chown -R run:run /home/run
-
-          # XFCE session file
-          sudo -u run bash -c 'cat > /home/run/.xsession <<EOF
+          # --------------------------------------------------------
+          # User XFCE session
+          # --------------------------------------------------------
+          sudo -u run tee /home/run/.xsession > /dev/null <<'EOF'
           export XDG_CONFIG_DIRS=/etc/xdg
           export XDG_CURRENT_DESKTOP=XFCE
           export XDG_SESSION_DESKTOP=xfce
           export DESKTOP_SESSION=xfce
+
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
+
           exec dbus-run-session -- startxfce4
-          EOF'
+          EOF
 
-          sudo chmod 755 /home/run/.xsession
           sudo chown run:run /home/run/.xsession
+          sudo chmod 755 /home/run/.xsession
 
-          # Explicit XRDP startup
+          # --------------------------------------------------------
+          # XRDP startup
+          # --------------------------------------------------------
           sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
           #!/bin/sh
 
@@ -96,16 +128,20 @@ jobs:
 
           sudo chmod 755 /etc/xrdp/startwm.sh
 
-          # XRDP certificate permissions
+          # Allow XRDP to read its TLS certificate.
           sudo adduser xrdp ssl-cert || true
 
-          # Restart XRDP
+          # Restart XRDP after configuration.
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
+          echo ""
           echo "===== XRDP STATUS ====="
           sudo systemctl --no-pager --full status xrdp || true
 
+      # ------------------------------------------------------------
+      # Connect runner to Tailscale
+      # ------------------------------------------------------------
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -114,12 +150,15 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
+      # ------------------------------------------------------------
+      # Get Tailscale address
+      # ------------------------------------------------------------
       - name: Get Tailscale IP
         shell: bash
         run: |
           set -e
 
-          TS_IP=$(tailscale ip -4)
+          TS_IP="$(tailscale ip -4)"
 
           if [ -z "$TS_IP" ]; then
             echo "::error::Could not obtain Tailscale IPv4 address."
@@ -128,14 +167,47 @@ jobs:
 
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-          echo "Tailscale IPv4: $TS_IP"
+          echo "Tailscale IP: $TS_IP"
 
+      # ------------------------------------------------------------
+      # Configure firewall AFTER Tailscale exists
+      # ------------------------------------------------------------
+      - name: Configure Firewall
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get install -y ufw
+
+          # Allow RDP only from the Tailscale CGNAT range.
+          sudo ufw allow from 100.64.0.0/10 \
+            to any port 3389 proto tcp
+
+          # Also explicitly allow RDP through the Tailscale interface.
+          sudo ufw allow in on tailscale0 \
+            to any port 3389 proto tcp
+
+          sudo ufw --force enable
+
+          sudo ufw status verbose
+
+      # ------------------------------------------------------------
+      # Verify XRDP
+      # ------------------------------------------------------------
       - name: Verify XRDP
         shell: bash
         run: |
           set -e
 
-          echo "=== XRDP LISTENING ==="
+          echo "===== TAILSCALE ====="
+          tailscale status
+
+          echo ""
+          echo "===== TAILSCALE IP ====="
+          echo "$TAILSCALE_IP"
+
+          echo ""
+          echo "===== XRDP LISTENING ====="
           sudo ss -lntp | grep ':3389' || {
             echo "::error::XRDP is not listening on port 3389."
             sudo journalctl -u xrdp --no-pager -n 100
@@ -143,59 +215,61 @@ jobs:
           }
 
           echo ""
-          echo "=== XRDP SERVICE ==="
-          sudo systemctl --no-pager --full status xrdp
-
-          echo ""
-          echo "=== XFCE CHECK ==="
+          echo "===== XFCE ====="
           command -v startxfce4
           command -v xfce4-session
+          command -v xfconf-query
+          command -v dbus-run-session
 
-      - name: Diagnose XFCE and XRDP
+          echo ""
+          echo "===== XRDP SERVICE ====="
+          sudo systemctl --no-pager --full status xrdp
+
+      # ------------------------------------------------------------
+      # XFCE diagnostics
+      # ------------------------------------------------------------
+      - name: Diagnose XFCE
         shell: bash
         run: |
-          echo "===== XFCE ====="
-          command -v startxfce4 || true
-          command -v xfce4-session || true
-          command -v xfconfd || true
-          command -v dbus-run-session || true
+          echo "===== XFCONF ====="
+
+          dpkg -L xfconf | grep -E 'xfconfd|xfconf-query' || true
 
           echo ""
-          echo "===== XDG CONFIG ====="
-          ls -ld /etc/xdg
-          ls -la /etc/xdg | head -50
+          echo "===== XFCE SESSION ====="
 
-          echo ""
-          echo "===== USER SESSION FILE ====="
           sudo cat /home/run/.xsession
 
           echo ""
-          echo "===== XRDP LISTENING ====="
-          sudo ss -lntp | grep 3389 || true
+          echo "===== XDG CONFIG ====="
+
+          ls -ld /etc/xdg
+          ls -la /etc/xdg/xfce4 || true
 
           echo ""
           echo "===== XRDP LOG ====="
+
           sudo tail -100 /var/log/xrdp.log || true
 
           echo ""
           echo "===== XRDP SESSION LOG ====="
+
           sudo tail -150 /var/log/xrdp-sesman.log || true
 
-          echo ""
-          echo "===== USER FILES ====="
-          sudo ls -la /home/run
-
+      # ------------------------------------------------------------
+      # Display connection information
+      # ------------------------------------------------------------
       - name: Maintain Connection
         shell: bash
         run: |
           echo ""
-          echo "=============================="
-          echo "          ACCESS"
-          echo "=============================="
-          echo "Address: $TAILSCALE_IP"
+          echo "================================"
+          echo "          RDP ACCESS"
+          echo "================================"
+          echo "Address:  $TAILSCALE_IP"
           echo "Username: run"
-          echo "Password: [value stored in RUN_PASSWORD secret]"
-          echo "=============================="
+          echo "Password: value stored in RUN_PASSWORD secret"
+          echo "================================"
           echo ""
 
           while true; do
