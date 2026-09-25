@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  secure-build:
     runs-on: windows-latest
     # GitHub-hosted runners hard-cap job execution at 6 hours.
     timeout-minutes: 360
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Configure Core Settings
         run: |
           # Enable Remote Desktop
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
@@ -41,21 +41,21 @@ jobs:
           # (Optional) Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Fixed Password
+      - name: Create User with added Secret Password
         env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
         run: |
-          if ([string]::IsNullOrEmpty($env:RDP_PASSWORD)) {
-              Write-Error "RDP_PASSWORD secret is not set. Add it under repo Settings > Secrets and variables > Actions."
+          if ([string]::IsNullOrEmpty($env:RUN_PASSWORD)) {
+              Write-Error "RUN_PASSWORD secret is not set. Add it under repo Settings > Secrets and variables > Actions."
               exit 1
           }
 
-          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          $securePass = ConvertTo-SecureString $env:RUN_PASSWORD -AsPlainText -Force
+          New-LocalUser -Name "run" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "run"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "run"
 
-          if (-not (Get-LocalUser -Name "RDP")) {
+          if (-not (Get-LocalUser -Name "run")) {
               Write-Error "User creation failed"
               exit 1
           }
@@ -130,7 +130,7 @@ jobs:
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Verify RDP Accessibility
+      - name: Verify Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
 
@@ -144,14 +144,16 @@ jobs:
 
       - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host ""
+          Write-Host "=== ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: (the one you set in the RDP_PASSWORD secret)"
-          Write-Host "==================`n"
-
+          Write-Host "Username: run"
+          Write-Host "Password: (the one you set in the RUN_PASSWORD secret)"
+          Write-Host "=================="
+          Write-Host ""
+      
           # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Write-Host "[$(Get-Date)] Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
