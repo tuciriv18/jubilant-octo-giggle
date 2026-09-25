@@ -6,49 +6,98 @@ on:
 jobs:
   secure-build:
     runs-on: ubuntu-latest
-    # GitHub-hosted runners hard-cap job execution at 6 hours.
     timeout-minutes: 360
 
     steps:
       - name: Install Desktop Environment and XRDP
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xrdp
+          set -e
 
-      - name: Create User with added Secret Password
+          sudo apt-get update
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            xrdp \
+            xorgxrdp \
+            dbus-x11
+
+      - name: Create User
         env:
           RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
+        shell: bash
         run: |
+          set -e
+
           if [ -z "$RUN_PASSWORD" ]; then
-            echo "::error::RUN_PASSWORD secret is not set. Add it under repo Settings > Secrets and variables > Actions."
+            echo "::error::RUN_PASSWORD secret is not set."
             exit 1
           fi
 
-          sudo useradd -m -s /bin/bash run
+          if id run >/dev/null 2>&1; then
+            echo "User 'run' already exists."
+          else
+            sudo useradd -m -s /bin/bash run
+          fi
+
           echo "run:$RUN_PASSWORD" | sudo chpasswd
           sudo usermod -aG sudo run
 
-      - name: Configure XRDP Session and Firewall
+      - name: Configure XFCE and XRDP
+        shell: bash
         run: |
-          # Point xrdp at an XFCE session for the new user
-          echo "xfce4-session" | sudo tee /home/run/.xsession
-          sudo chown run:run /home/run/.xsession
+          set -e
 
-          # xrdp needs this to read the TLS cert it generates on install
-          sudo adduser xrdp ssl-cert
-          sudo systemctl enable --now xrdp
+          # User XFCE startup
+          sudo -u run bash -c 'printf "%s\n" "startxfce4" > "$HOME/.xsession"'
+          sudo -u run chmod +x /home/run/.xsession
 
-          # Scope RDP (port 3389, same as Windows) to Tailscale's CGNAT
-          # range only. GitHub-hosted Ubuntu runners get a public IP too —
-          # an unscoped rule would open 3389 to the whole internet, not
-          # just your tailnet.
-          sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
+          # Remove stale XFCE session data
+          sudo -u run rm -rf /home/run/.cache/sessions
+
+          # Configure XRDP startup
+          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+          #!/bin/sh
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          if [ -r /etc/profile ]; then
+              . /etc/profile
+          fi
+
+          if [ -r "$HOME/.profile" ]; then
+              . "$HOME/.profile"
+          fi
+
+          exec startxfce4
+          EOF
+
+          sudo chmod 755 /etc/xrdp/startwm.sh
+
+          # Allow xrdp to access its TLS certificate
+          sudo adduser xrdp ssl-cert || true
+
+          # Restart XRDP after configuration
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+
+          echo "=== XRDP STATUS ==="
+          sudo systemctl --no-pager --full status xrdp || true
+
+      - name: Configure Firewall
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get install -y ufw
+
+          sudo ufw allow from 100.64.0.0/10 \
+            to any port 3389 proto tcp
+
           sudo ufw --force enable
 
-      # The official Tailscale action supports Linux runners directly —
-      # unlike Windows, no manual API calls needed here. Reuses the same
-      # TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET secrets from the
-      # Windows workflow.
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -58,33 +107,56 @@ jobs:
           hostname: gh-runner-${{ github.run_id }}
 
       - name: Get Tailscale IP
+        shell: bash
         run: |
+          set -e
+
           TS_IP=$(tailscale ip -4)
-          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-      - name: Verify Accessibility
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-
-          if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$TAILSCALE_IP/3389" 2>/dev/null; then
-            echo "TCP connectivity successful!"
-          else
-            echo "::error::TCP connection to RDP port 3389 failed"
+          if [ -z "$TS_IP" ]; then
+            echo "::error::Could not obtain Tailscale IPv4 address."
             exit 1
           fi
 
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+
+          echo "Tailscale IPv4: $TS_IP"
+
+      - name: Verify XRDP
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== XRDP LISTENING ==="
+          sudo ss -lntp | grep ':3389' || {
+            echo "::error::XRDP is not listening on port 3389."
+            sudo journalctl -u xrdp --no-pager -n 100
+            exit 1
+          }
+
+          echo ""
+          echo "=== XRDP SERVICE ==="
+          sudo systemctl --no-pager --full status xrdp
+
+          echo ""
+          echo "=== XFCE CHECK ==="
+          command -v startxfce4
+          command -v xfce4-session
+
       - name: Maintain Connection
+        shell: bash
         run: |
           echo ""
-          echo "=== ACCESS ==="
+          echo "=============================="
+          echo "          ACCESS"
+          echo "=============================="
           echo "Address: $TAILSCALE_IP"
           echo "Username: run"
-          echo "Password: (the one you set in the RUN_PASSWORD secret)"
-          echo "=================="
+          echo "Password: [value stored in RUN_PASSWORD secret]"
+          echo "=============================="
           echo ""
 
-          # Keep runner active indefinitely (or until manually cancelled)
           while true; do
-            echo "[$(date)] Active - Use Ctrl+C in workflow to terminate"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Runner active"
             sleep 300
           done
