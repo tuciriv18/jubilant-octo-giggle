@@ -51,11 +51,11 @@ jobs:
           }
 
           $securePass = ConvertTo-SecureString $env:RUN_PASSWORD -AsPlainText -Force
-          New-LocalUser -Name "run" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "run"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "run"
+          New-LocalUser -Name "win" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "win"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "win"
 
-          if (-not (Get-LocalUser -Name "run")) {
+          if (-not (Get-LocalUser -Name "win")) {
               Write-Error "User creation failed"
               exit 1
           }
