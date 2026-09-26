@@ -61,7 +61,7 @@ jobs:
       - name: Start RDP-to-VNC Bridge (Port 3389)
         run: |
           brew install colima docker
-          colima start --cpu 2 --memory 2g
+          colima start --cpus 2 --memory 2
           
           docker run -d --name rdp-bridge \
             -p 3389:3389 \
