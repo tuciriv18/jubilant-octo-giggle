@@ -1,52 +1,61 @@
 name: Remote macOS GUI Session
 
-on: 
+on:
   workflow_dispatch:
 
 jobs:
   macos-gui:
-    runs-on: macos-15 # Apple Silicon Runner
-    
+    runs-on: macos-15
+    timeout-minutes: 360
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Step 1: Connect to your Tailscale Network
+      # Step 1: Connect to Tailscale Network
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
           tags: tag:ci
+          hostname: gh-runner-${{ github.run_id }}
 
       # Step 2: Configure Native User Auth & Display Server
       - name: Setup & Start VNC Server
         run: |
-          # 1. 'runner' account ka system password set karein
+          # Set 'runner' account system password
           sudo sysadminctl -resetPasswordFor runner -newPassword "SecretVNC123"
 
-          # 2. Remote Management ko 'runner' user ke liye full privileges ke saath start karein
-          # (Legacy -setvncpassword hata diya gaya hai)
+          # Start Remote Management (VNC) for 'runner'
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -users runner -privs -all \
             -restart -agent
 
-          # 3. Virtual display buffer enable karein aur screen ko active state me rakhein
+          # Enable display resolution defaults and keep display awake
           sudo defaults write /Library/Preferences/com.apple.windowserver.displays DisplayResolutionEnabled -bool true
           caffeinate -dimsu &
 
-      # Step 3: Find the Tailscale IP of this Runner
-      - name: Get Tailscale IP
+      # Step 3: Display Connection Info
+      - name: Get Tailscale IP & Connection Info
         run: |
+          TS_IP=$(tailscale ip -4)
+          echo ""
           echo "========================================="
-          echo "IP Address : $(tailscale ip -4)"
-          echo "Username : runner"
-          echo "Password : SecretVNC123"
+          echo " macOS VNC ACCESS INFO"
+          echo " Address  : $TS_IP"
+          echo " Port     : 5900"
+          echo " Username : runner"
+          echo " Password : SecretVNC123"
           echo "========================================="
+          echo ""
 
-      # Step 4: Keep the workflow alive
+      # Step 4: Keep the workflow alive for active session
       - name: Keep Runner Alive for GUI Access
         run: |
-          echo "Runner is waiting for your connection..."
-          sleep 1800 # 30 minutes
+          echo "Runner is waiting for VNC connection..."
+          while true; do
+            echo "[$(date)] Runner active - Connect via VNC to $(tailscale ip -4):5900"
+            sleep 300
+          done
