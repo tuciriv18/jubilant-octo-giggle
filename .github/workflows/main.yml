@@ -57,33 +57,45 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
           caffeinate -dimsu &
 
-      # Step 3: Start RDP Bridge on Port 3389 for Windows mstsc.exe
-      - name: Start RDP-to-VNC Bridge (Port 3389)
+      # Step 3: Build & Start Native Native XRDP Bridge on macOS (No VM / Docker Required)
+      - name: Build & Start Native RDP Server
         run: |
-          brew install colima docker
-          colima start --cpus 2 --memory 2
-          
-          docker run -d --name rdp-bridge \
-            -p 3389:3389 \
-            --add-host=host.docker.internal:host-gateway \
-            alpine sh -c "
-              apk add --no-cache xrdp ;
-              cat << 'EOF' > /etc/xrdp/xrdp.ini
+          # 1. Install build dependencies
+          brew install autoconf automake libtool pkg-config libvncserver nasm openssl@3
+
+          # 2. Clone and build xrdp natively on macOS host
+          git clone --recursive https://github.com/neutrinolabs/xrdp.git
+          cd xrdp
+          ./bootstrap
+          ./configure --enable-vnc --prefix=/usr/local
+          make -j$(sysctl -n hw.ncpu)
+          sudo make install
+
+          # 3. Create config directory & SSL certs
+          sudo mkdir -p /etc/xrdp
+          sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem -days 365 -subj "/CN=macOS-RDP" 2>/dev/null || true
+
+          # 4. Configure xrdp.ini to proxy incoming RDP (3389) directly to macOS VNC (5900)
+          sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'EOF'
           [globals]
           bitmap_cache=true
           bitmap_compression=true
           port=3389
+          crypt_level=low
+          security_layer=rdp
 
           [macOS-Desktop]
           name=macOS-Desktop
-          lib=libvnc.so
-          ip=host.docker.internal
+          lib=libvnc
+          ip=127.0.0.1
           port=5900
           username=vncuser
           password=SecretVNC123
           EOF
-              xrdp -nodaemon
-            "
+
+          # 5. Start XRDP server daemon
+          sudo /usr/local/sbin/xrdp &
+          sleep 2
 
       # Step 4: Display Connection Info for Windows mstsc.exe
       - name: Get Connection Details
