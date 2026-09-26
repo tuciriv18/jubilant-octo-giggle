@@ -45,6 +45,7 @@ jobs:
   secure-build:
     needs: prepare-matrix
     strategy:
+      fail-fast: false
       matrix:
         runner_os: ${{ fromJson(needs.prepare-matrix.outputs.runners) }}
     runs-on: ${{ matrix.runner_os }}
@@ -188,7 +189,8 @@ jobs:
               Write-Error "RUN_PASSWORD secret is not set. Add it under repo Settings > Secrets and variables > Actions.";
               exit 1;
           }
-          $securePass = ConvertTo-SecureString$env:RUN_PASSWORD -AsPlainText -Force;
+          $plainPass =$env:RUN_PASSWORD;
+          $securePass = ConvertTo-SecureString$plainPass -AsPlainText -Force;
           New-LocalUser -Name "run" -Password $securePass -AccountNeverExpires;
           Add-LocalGroupMember -Group "Administrators" -Member "run";
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "run";
