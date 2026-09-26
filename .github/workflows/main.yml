@@ -21,41 +21,37 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
-      # Step 2: Fix Internet DNS & Setup macOS Desktop
-      - name: Fix Internet DNS & Setup macOS Desktop
+      # Step 2: Setup macOS Desktop, User, TCC Permissions & Bypass First-Boot Popups
+      - name: Setup macOS Desktop & VNC Engine
         run: |
-          # 1. Restore Public DNS for Safari Internet Access (Fixes Safari Can't Find Server)
-          sudo networksetup -setdnsservers Ethernet 1.1.1.1 8.8.8.8 2>/dev/null || true
-          sudo networksetup -setdnsservers "Wi-Fi" 1.1.1.1 8.8.8.8 2>/dev/null || true
-
-          # 2. Create 'vncuser' admin account
+          # 1. Create 'vncuser' admin account
           sudo sysadminctl -addUser vncuser -fullName "VNC User" -password "SecretVNC123" -admin
 
-          # 3. Bypass macOS Setup Assistant & Software Update popups
+          # 2. Bypass macOS Setup Assistant & System Popups
           sudo touch /var/db/.AppleSetupDone
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeCloudSetup -bool true
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeSiriSetup -bool true
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeePrivacy -bool true
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeAccessibility -bool true
-          sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticDownload -bool false
+          sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false
           
-          # Background loop to kill setup windows
-          (while true; do sudo killall "Setup Assistant" "SoftwareUpdateNotificationManager" 2>/dev/null; sleep 3; done) &
+          # Disable "Click Wallpaper to Show Desktop Items" hint banner
+          defaults write com.apple.WindowManager EnableStandardClickToShowDesktop -bool false
 
-          # 4. Enable Display Resolutions in macOS WindowServer
-          sudo defaults write /Library/Preferences/com.apple.windowserver.displays DisplayResolutionEnabled -bool true
+          # Background loop to immediately kill Setup Assistant if it pops up
+          (while true; do sudo killall "Setup Assistant" 2>/dev/null; sleep 3; done) &
 
-          # 5. Configure VNC password authentication
+          # 3. Configure VNC password authentication
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "SecretVNC123"
 
-          # 6. Activate ARD Agent with Full Control Privileges
+          # 4. Activate ARD Agent with Full Control Privileges
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -users vncuser,runner -privs -all \
             -restart -agent
 
-          # 7. Inject TCC permissions
+          # 5. Inject TCC permissions (Screen Capture, Accessibility, Mouse/Keyboard Input)
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           for SERVICE in "kTCCServiceScreenCapture" "kTCCServiceAccessibility" "kTCCServicePostEvent"; do
             for CLIENT in "com.apple.RemoteDesktopAgent" "com.apple.screensharing.agent"; do
@@ -63,25 +59,22 @@ jobs:
             done
           done
 
-          # 8. Enable Auto-Login & Keep Display Awake
+          # 6. Enable Auto-Login & Keep Display Awake
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
           caffeinate -dimsu &
 
-      # Step 3: Force 1080p Resolution & Build Native XRDP Bridge
-      - name: Build & Start Native RDP Server
+      # Step 3: Build XRDP, Install displayplacer & Force 1920x1080 Resolution
+      - name: Build XRDP & Enforce 1080p Resolution
         run: |
-          # 1. Install build dependencies and display resolution utility
+          # 1. Install build dependencies + displayplacer
           brew install autoconf automake libtool pkg-config libvncserver nasm openssl@3 libx11 libxfixes libxrandr libxkbfile pixman displayplacer
 
-          # 2. Force macOS resolution to 1920x1080
-          displayplacer "res:1920x1080" 2>/dev/null || true
-
-          # 3. Set Homebrew environment variables
+          # 2. Set Homebrew environment variables with embedded rpath
           export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libvncserver/lib/pkgconfig:$PKG_CONFIG_PATH"
           export LDFLAGS="-L/opt/homebrew/lib -L/opt/homebrew/opt/openssl@3/lib -Wl,-rpath,/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/opt/openssl@3/lib"
           export CPPFLAGS="-I/opt/homebrew/include -I/opt/homebrew/opt/openssl@3/include"
 
-          # 4. Clone and build xrdp
+          # 3. Clone and build xrdp
           git clone --recursive https://github.com/neutrinolabs/xrdp.git
           cd xrdp
           ./bootstrap
@@ -89,26 +82,20 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
           sudo make install
 
-          # 5. Create module symlinks for dyld
+          # 4. Create module symlinks for XRDP
           sudo mkdir -p /usr/local/lib/xrdp
           sudo ln -sf /usr/local/lib/xrdp/libvnc.dylib /usr/local/lib/xrdp/libvnc.so 2>/dev/null || true
           sudo ln -sf /usr/local/lib/xrdp/libvnc.dylib /usr/local/lib/xrdp/libxrdp-vnc.so 2>/dev/null || true
 
-          # 6. Create SSL certs
+          # 5. Create config directory & SSL certs
           sudo mkdir -p /etc/xrdp
           sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem -days 365 -subj "/CN=macOS-RDP" 2>/dev/null || true
 
-          # 7. Configure xrdp.ini
+          # 6. Configure xrdp.ini
           sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'EOF'
           [globals]
           bitmap_cache=true
           bitmap_compression=true
-          bulk_compression=true
-          max_bpp=24
-          new_cursors=true
-          use_fastpath=both
-          tcp_nodelay=true
-          tcp_keepalive=true
           port=3389
           crypt_level=low
           security_layer=rdp
@@ -122,14 +109,14 @@ jobs:
           password=SecretVNC123
           EOF
 
-          # Re-apply DNS configuration
-          sudo networksetup -setdnsservers Ethernet 1.1.1.1 8.8.8.8 2>/dev/null || true
-
-          # 8. Start XRDP daemon
+          # 7. Start XRDP daemon
           sudo DYLD_LIBRARY_PATH="/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/usr/local/lib:/usr/local/lib/xrdp" /usr/local/sbin/xrdp &
           sleep 2
 
-      # Step 4: Display Connection Info
+          # 8. Force WindowServer display resolution to 1080p Full HD
+          displayplacer "res:1920x1080" 2>/dev/null || displayplacer "res:1920x1080 scaling:off" 2>/dev/null || true
+
+      # Step 4: Display Connection Info for Windows mstsc.exe
       - name: Get Connection Details
         run: |
           TS_IP=$(tailscale ip -4)
