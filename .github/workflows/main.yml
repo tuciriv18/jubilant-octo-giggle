@@ -21,17 +21,7 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
-      # Step 2: Fix DNS Resolution for Safari / Internet
-      - name: Fix DNS & Public Network Resolution
-        run: |
-          SERVICES=$(networksetup -listallnetworkservices | grep -v '\*')
-          while read -r SERVICE; do
-            if [ -n "$SERVICE" ]; then
-              sudo networksetup -setdnsservers "$SERVICE" 1.1.1.1 8.8.8.8 100.100.100.100 || true
-            fi
-          done <<< "$SERVICES"
-
-      # Step 3: Setup macOS Desktop, User, TCC Permissions & Bypass Setup Assistant
+      # Step 2: Setup macOS Desktop, User, TCC Permissions & Bypass Setup Assistant
       - name: Setup macOS Desktop & VNC Engine
         run: |
           # 1. Create 'vncuser' admin account
@@ -45,7 +35,7 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeAccessibility -bool true
           sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticDownload -bool false
           
-          # Background loop to kill lingering setup windows
+          # Background loop to kill setup popups
           (while true; do sudo killall "Setup Assistant" "SoftwareUpdateNotificationManager" 2>/dev/null; sleep 3; done) &
 
           # 3. Enable Display Resolutions in macOS WindowServer
@@ -73,16 +63,16 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
           caffeinate -dimsu &
 
-      # Step 4: Force 1080p Resolution & Build Native XRDP Bridge
+      # Step 3: Force 1080p Resolution & Build Native XRDP Bridge
       - name: Build & Start Native RDP Server
         run: |
           # 1. Install build dependencies and display resolution utility
           brew install autoconf automake libtool pkg-config libvncserver nasm openssl@3 libx11 libxfixes libxrandr libxkbfile pixman displayplacer
 
-          # 2. Force macOS display resolution to 1920x1080
-          displayplacer "res:1920x1080" 2>/dev/null || true
+          # 2. Force macOS resolution to 1920x1080 (1080p)
+          displayplacer "res:1920x1080" 2>/dev/null || displayplacer "res:1440x900" 2>/dev/null || true
 
-          # 3. Set Homebrew environment variables with embedded rpath
+          # 3. Set Homebrew environment variables
           export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libvncserver/lib/pkgconfig:$PKG_CONFIG_PATH"
           export LDFLAGS="-L/opt/homebrew/lib -L/opt/homebrew/opt/openssl@3/lib -Wl,-rpath,/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/opt/openssl@3/lib"
           export CPPFLAGS="-I/opt/homebrew/include -I/opt/homebrew/opt/openssl@3/include"
@@ -104,7 +94,7 @@ jobs:
           sudo mkdir -p /etc/xrdp
           sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem -days 365 -subj "/CN=macOS-RDP" 2>/dev/null || true
 
-          # 7. Configure xrdp.ini for 1920x1080 canvas & fast networking
+          # 7. Configure xrdp.ini for 1920x1080 canvas
           sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'EOF'
           [globals]
           bitmap_cache=true
@@ -134,7 +124,7 @@ jobs:
           sudo DYLD_LIBRARY_PATH="/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/usr/local/lib:/usr/local/lib/xrdp" /usr/local/sbin/xrdp &
           sleep 2
 
-      # Step 5: Display Connection Info
+      # Step 4: Display Connection Info
       - name: Get Connection Details
         run: |
           TS_IP=$(tailscale ip -4)
@@ -147,7 +137,7 @@ jobs:
           echo "========================================="
           echo ""
 
-      # Step 6: Maintain Connection Session
+      # Step 5: Maintain Connection Session
       - name: Keep Runner Alive
         run: |
           echo "Runner is waiting for Windows RDP connection..."
