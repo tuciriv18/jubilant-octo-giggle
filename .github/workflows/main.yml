@@ -93,8 +93,8 @@ jobs:
             echo ""
             echo "[$(date)] Active - Use Ctrl+C in workflow to terminate"
             echo "----- xrdp-sesman.log (tail) -----"
-            sudo tail -n 30 /var/log/xrdp-sesman.log 2>/dev/null
+            sudo tail -n 30 /var/log/xrdp-sesman.log 2>/dev/null || true
             echo "----- .xsession-errors (tail) -----"
-            sudo tail -n 30 /home/run/.xsession-errors 2>/dev/null
+            sudo tail -n 30 /home/run/.xsession-errors 2>/dev/null || true
             sleep 20
           done
