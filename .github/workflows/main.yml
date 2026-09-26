@@ -1,21 +1,37 @@
-name: Linux Build
+name: Secure Build & RDP Access
 
 on:
   workflow_dispatch:
+    inputs:
+      runner_os:
+        description: 'Select OS Runner'
+        required: true
+        default: 'ubuntu-latest'
+        type: choice
+        options:
+          - 'ubuntu-latest'
+          - 'windows-latest'
+          - 'windows-2022'
+          - 'windows-2025'
+          - 'windows-11-arm'
 
 jobs:
   secure-build:
-    runs-on: ubuntu-latest
-    # GitHub-hosted runners hard-cap job execution at 6 hours.
+    runs-on: ${{ inputs.runner_os }}
     timeout-minutes: 360
 
     steps:
-      - name: Install Desktop Environment and XRDP
+      # ==========================================
+      # LINUX / UBUNTU STEPS
+      # ==========================================
+      - name: "[Linux] Install Desktop Environment and XRDP"
+        if: ${{ runner.os == 'Linux' }}
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xfce4-session xfce4-settings xfconf xrdp xorgxrdp xorg dbus dbus-x11 dbus-user-session
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xfce4-session xfconf xrdp xorgxrdp xorg dbus dbus-x11 dbus-user-session
 
-      - name: Create User with added Secret Password
+      - name: "[Linux] Create User with added Secret Password"
+        if: ${{ runner.os == 'Linux' }}
         env:
           RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
         run: |
@@ -28,12 +44,9 @@ jobs:
           echo "run:$RUN_PASSWORD" | sudo chpasswd
           sudo usermod -aG sudo run
 
-      - name: Configure XRDP Session and Firewall
+      - name: "[Linux] Configure XRDP Session and Firewall"
+        if: ${{ runner.os == 'Linux' }}
         run: |
-          # Exact session-start logic from the version that actually booted.
-          # No dbus-launch wrapper: startxfce4 sets up D-Bus itself, but
-          # only once DBUS_SESSION_BUS_ADDRESS / XDG_RUNTIME_DIR are cleared
-          # first, in case xrdp's session left them set to something stale.
           sudo tee /home/run/.xsession > /dev/null <<'EOF'
           #!/bin/sh
           export XDG_CONFIG_DIRS=/etc:/etc/xdg
@@ -49,9 +62,6 @@ jobs:
           sudo chown run:run /home/run/.xsession
           sudo chmod +x /home/run/.xsession
 
-          # Bypass /etc/X11/Xsession (Debian's own wrapper script) entirely
-          # and go straight to .xsession with the environment pre-set —
-          # this was the other half of what actually worked.
           sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
           #!/bin/sh
           unset DBUS_SESSION_BUS_ADDRESS
@@ -70,22 +80,14 @@ jobs:
           EOF
           sudo chmod 755 /etc/xrdp/startwm.sh
 
-          # xrdp needs this to read the TLS cert it generates on install
           sudo adduser xrdp ssl-cert
           sudo systemctl enable --now xrdp
 
-          # Scope RDP (port 3389, same as Windows) to Tailscale's CGNAT
-          # range only. GitHub-hosted Ubuntu runners get a public IP too —
-          # an unscoped rule would open 3389 to the whole internet, not
-          # just your tailnet.
           sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
           sudo ufw --force enable
 
-      # The official Tailscale action supports Linux runners directly —
-      # unlike Windows, no manual API calls needed here. Reuses the same
-      # TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET secrets from the
-      # Windows workflow.
-      - name: Connect to Tailscale
+      - name: "[Linux] Connect to Tailscale"
+        if: ${{ runner.os == 'Linux' }}
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -93,12 +95,14 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
-      - name: Get Tailscale IP
+      - name: "[Linux] Get Tailscale IP"
+        if: ${{ runner.os == 'Linux' }}
         run: |
           TS_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-      - name: Verify Accessibility
+      - name: "[Linux] Verify Accessibility"
+        if: ${{ runner.os == 'Linux' }}
         run: |
           echo "Tailscale IP: $TAILSCALE_IP"
 
@@ -109,7 +113,8 @@ jobs:
             exit 1
           fi
 
-      - name: Maintain Connection
+      - name: "[Linux] Maintain Connection"
+        if: ${{ runner.os == 'Linux' }}
         run: |
           echo ""
           echo "=== ACCESS ==="
@@ -119,11 +124,6 @@ jobs:
           echo "=================="
           echo ""
 
-          # Keep runner active, and surface the two logs that actually show
-          # what happens when a session start is attempted. Interval is
-          # short (20s) on purpose right now so a log entry shows up soon
-          # after you try connecting — put it back to something longer
-          # once this is sorted out.
           while true; do
             echo ""
             echo "[$(date)] Active - Use Ctrl+C in workflow to terminate"
@@ -133,3 +133,143 @@ jobs:
             sudo tail -n 30 /home/run/.xsession-errors 2>/dev/null || true
             sleep 20
           done
+
+      # ==========================================
+      # WINDOWS STEPS
+      # ==========================================
+      - name: "[Windows] Configure Core Settings"
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 2 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
+
+          Restart-Service -Name TermService -Force
+
+      - name: "[Windows] Create User with added Secret Password"
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        env:
+          RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:RUN_PASSWORD)) {
+              Write-Error "RUN_PASSWORD secret is not set. Add it under repo Settings > Secrets and variables > Actions."
+              exit 1
+          }
+
+          $securePass = ConvertTo-SecureString $env:RUN_PASSWORD -AsPlainText -Force
+          New-LocalUser -Name "run" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "run"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "run"
+
+          if (-not (Get-LocalUser -Name "run")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+      - name: "[Windows] Install Tailscale"
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: "[Windows] Mint short-lived Tailscale auth key (OAuth client)"
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+        run: |
+          $tokenBody = "client_id=$([uri]::EscapeDataString($env:TS_OAUTH_CLIENT_ID))" + `
+                       "&client_secret=$([uri]::EscapeDataString($env:TS_OAUTH_CLIENT_SECRET))"
+          $tokenResp = Invoke-RestMethod -Method Post `
+            -Uri "https://api.tailscale.com/api/v2/oauth/token" `
+            -ContentType "application/x-www-form-urlencoded" `
+            -Body $tokenBody
+          Write-Host "::add-mask::$($tokenResp.access_token)"
+
+          $keyBody = @{
+            capabilities = @{
+              devices = @{
+                create = @{
+                  reusable      = $false
+                  ephemeral     = $true
+                  preauthorized = $true
+                  tags          = @("tag:ci")
+                }
+              }
+            }
+            expirySeconds = 3600
+          } | ConvertTo-Json -Depth 5
+
+          $keyResp = Invoke-RestMethod -Method Post `
+            -Uri "https://api.tailscale.com/api/v2/tailnet/-/keys" `
+            -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } `
+            -ContentType "application/json" -Body $keyBody
+
+          Write-Host "::add-mask::$($keyResp.key)"
+          echo "TS_AUTHKEY=$($keyResp.key)" >> $env:GITHUB_ENV
+
+      - name: "[Windows] Establish Tailscale Connection"
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null$retries = 0
+          while (-not $tsIP -and$retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: "[Windows] Verify Accessibility"
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+
+          $testResult = Test-NetConnection -ComputerName$env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: "[Windows] Maintain Connection"
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=== ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: run"
+          Write-Host "Password: (the one you set in the RUN_PASSWORD secret)"
+          Write-Host "=================="
+          Write-Host ""
+
+          while ($true) {
+              Write-Host "[$(Get-Date)] Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
