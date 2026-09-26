@@ -3,20 +3,51 @@ name: Secure Build
 on:
   workflow_dispatch:
     inputs:
-      runner_os:
-        description: 'Select Runner'
-        required: true
-        default: 'ubuntu-latest'
-        type: choice
-        options:
-          - 'ubuntu-latest'
-          - 'windows-latest'
-          - 'windows-2022'
-          - 'windows-11-arm'
+      ubuntu_latest:
+        description: 'Run on ubuntu-latest'
+        type: boolean
+        default: true
+      windows_latest:
+        description: 'Run on windows-latest'
+        type: boolean
+        default: false
+      windows_2022:
+        description: 'Run on windows-2022'
+        type: boolean
+        default: false
+      windows_11_arm:
+        description: 'Run on windows-11-arm'
+        type: boolean
+        default: false
 
 jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      runners: ${{ steps.set-runners.outputs.runners }}
+    steps:
+      - id: set-runners
+        run: |
+          RUNNERS=()
+          if [ "${{ inputs.ubuntu_latest }}" = "true" ]; then RUNNERS+=('"ubuntu-latest"'); fi
+          if [ "${{ inputs.windows_latest }}" = "true" ]; then RUNNERS+=('"windows-latest"'); fi
+          if [ "${{ inputs.windows_2022 }}" = "true" ]; then RUNNERS+=('"windows-2022"'); fi
+          if [ "${{ inputs.windows_11_arm }}" = "true" ]; then RUNNERS+=('"windows-11-arm"'); fi
+
+          # Default fallback if nothing selected
+          if [ ${#RUNNERS[@]} -eq 0 ]; then
+            RUNNERS+=('"ubuntu-latest"')
+          fi
+
+          JSON_ARRAY="[$(IFS=,; echo "${RUNNERS[*]}")]"
+          echo "runners=$JSON_ARRAY" >> "$GITHUB_OUTPUT"
+
   secure-build:
-    runs-on: ${{ inputs.runner_os }}
+    needs: prepare-matrix
+    strategy:
+      matrix:
+        runner_os: ${{ fromJson(needs.prepare-matrix.outputs.runners) }}
+    runs-on: ${{ matrix.runner_os }}
     timeout-minutes: 360
 
     steps:
@@ -166,7 +197,7 @@ jobs:
               exit 1
           }
 
-          $securePass = ConvertTo-SecureString $env:RUN_PASSWORD -AsPlainText -Force
+          $securePass = ConvertTo-SecureString$env:RUN_PASSWORD -AsPlainText -Force
           New-LocalUser -Name "run" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "run"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "run"
@@ -183,7 +214,7 @@ jobs:
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Invoke-WebRequest -Uri $tsUrl -OutFile$installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
@@ -230,8 +261,9 @@ jobs:
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname=gh-runner-$env:GITHUB_RUN_ID
 
-          $tsIP = $null$retries = 0
-          while (-not $tsIP -and$retries -lt 10) {
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
@@ -249,7 +281,7 @@ jobs:
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
 
-          $testResult = Test-NetConnection -ComputerName$env:TAILSCALE_IP -Port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
