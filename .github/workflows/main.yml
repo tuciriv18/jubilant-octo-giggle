@@ -21,23 +21,26 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
-      # Step 2: Configure Native User Auth & Display Server
+      # Step 2: Configure Password & VNC Server
       - name: Setup & Start VNC Server
         run: |
-          # Set 'runner' account system password
-          sudo sysadminctl -resetPasswordFor runner -newPassword "SecretVNC123"
+          # 1. 'runner' user ka system password change karein (bypassing Secure Token)
+          sudo dscl . -passwd /Users/runner "SecretVNC123"
 
-          # Start Remote Management (VNC) for 'runner'
+          # 2. TigerVNC ke liye direct VNC authentication mode enable karein
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -specifiedvnc -install -vncpasswd "SecretVNC123"
+
+          # 3. Remote Management service restart karein
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -users runner -privs -all \
             -restart -agent
 
-          # Enable display resolution defaults and keep display awake
-          sudo defaults write /Library/Preferences/com.apple.windowserver.displays DisplayResolutionEnabled -bool true
+          # 4. Display awake rakhein
           caffeinate -dimsu &
 
-      # Step 3: Display Connection Info
+      # Step 3: Display Connection Details
       - name: Get Tailscale IP & Connection Info
         run: |
           TS_IP=$(tailscale ip -4)
@@ -51,7 +54,7 @@ jobs:
           echo "========================================="
           echo ""
 
-      # Step 4: Keep the workflow alive for active session
+      # Step 4: Maintain Active Session
       - name: Keep Runner Alive for GUI Access
         run: |
           echo "Runner is waiting for VNC connection..."
