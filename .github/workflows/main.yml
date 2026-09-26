@@ -1,10 +1,10 @@
-name: Remote macOS RDP Session (mstsc.exe)
+name: Remote macOS GUI Session
 
 on:
   workflow_dispatch:
 
 jobs:
-  macos-rdp:
+  macos-gui:
     runs-on: macos-15
     timeout-minutes: 360
 
@@ -21,119 +21,53 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
-      # Step 2: Setup macOS Desktop, User, TCC Permissions & Bypass First-Boot Popups
-      - name: Setup macOS Desktop & VNC Engine
+      # Step 2: Create New User & Bypass TCC / Fix Black Screen
+      - name: Setup New Admin User & TCC Permissions
         run: |
-          # 1. Create 'vncuser' admin account
+          # 1. Create new Admin user 'vncuser'
           sudo sysadminctl -addUser vncuser -fullName "VNC User" -password "SecretVNC123" -admin
 
-          # 2. Bypass macOS Setup Assistant & System Popups
-          sudo touch /var/db/.AppleSetupDone
-          sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeCloudSetup -bool true
-          sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeSiriSetup -bool true
-          sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeePrivacy -bool true
-          sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeAccessibility -bool true
-          sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false
-          
-          # Disable "Click Wallpaper to Show Desktop Items" hint banner
-          defaults write com.apple.WindowManager EnableStandardClickToShowDesktop -bool false
-
-          # Background loop to immediately kill Setup Assistant if it pops up
-          (while true; do sudo killall "Setup Assistant" 2>/dev/null; sleep 3; done) &
-
-          # 3. Configure VNC password authentication
+          # 2. Configure VNC password via correct kickstart clientopts
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "SecretVNC123"
 
-          # 4. Activate ARD Agent with Full Control Privileges
+          # 3. Activate Remote Management service for 'vncuser'
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
-            -users vncuser,runner -privs -all \
+            -users vncuser -privs -all \
             -restart -agent
 
-          # 5. Inject TCC permissions (Screen Capture, Accessibility, Mouse/Keyboard Input)
+          # 4. Inject TCC permissions using explicit column names (bypasses macOS 15 schema column mismatch)
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          for SERVICE in "kTCCServiceScreenCapture" "kTCCServiceAccessibility" "kTCCServicePostEvent"; do
-            for CLIENT in "com.apple.RemoteDesktopAgent" "com.apple.screensharing.agent"; do
-              sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('$SERVICE', '$CLIENT', 0, 2, 4, 1);"
-            done
-          done
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.RemoteDesktopAgent', 0, 2, 4, 1);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceAccessibility', 'com.apple.RemoteDesktopAgent', 0, 2, 4, 1);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.screensharing.agent', 0, 2, 4, 1);"
 
-          # 6. Enable Auto-Login & Keep Display Awake
+          # 5. Set Auto-Login for 'vncuser' to activate GUI display session
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
+
+          # 6. Prevent screen sleep
           caffeinate -dimsu &
 
-      # Step 3: Build XRDP, Install displayplacer & Force 1920x1080 Resolution
-      - name: Build XRDP & Enforce 1080p Resolution
-        run: |
-          # 1. Install build dependencies + displayplacer
-          brew install autoconf automake libtool pkg-config libvncserver nasm openssl@3 libx11 libxfixes libxrandr libxkbfile pixman displayplacer
-
-          # 2. Set Homebrew environment variables with embedded rpath
-          export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libvncserver/lib/pkgconfig:$PKG_CONFIG_PATH"
-          export LDFLAGS="-L/opt/homebrew/lib -L/opt/homebrew/opt/openssl@3/lib -Wl,-rpath,/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/opt/openssl@3/lib"
-          export CPPFLAGS="-I/opt/homebrew/include -I/opt/homebrew/opt/openssl@3/include"
-
-          # 3. Clone and build xrdp
-          git clone --recursive https://github.com/neutrinolabs/xrdp.git
-          cd xrdp
-          ./bootstrap
-          ./configure --enable-vnc --prefix=/usr/local --x-includes=/opt/homebrew/include --x-libraries=/opt/homebrew/lib
-          make -j$(sysctl -n hw.ncpu)
-          sudo make install
-
-          # 4. Create module symlinks for XRDP
-          sudo mkdir -p /usr/local/lib/xrdp
-          sudo ln -sf /usr/local/lib/xrdp/libvnc.dylib /usr/local/lib/xrdp/libvnc.so 2>/dev/null || true
-          sudo ln -sf /usr/local/lib/xrdp/libvnc.dylib /usr/local/lib/xrdp/libxrdp-vnc.so 2>/dev/null || true
-
-          # 5. Create config directory & SSL certs
-          sudo mkdir -p /etc/xrdp
-          sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem -days 365 -subj "/CN=macOS-RDP" 2>/dev/null || true
-
-          # 6. Configure xrdp.ini
-          sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'EOF'
-          [globals]
-          bitmap_cache=true
-          bitmap_compression=true
-          port=3389
-          crypt_level=low
-          security_layer=rdp
-
-          [macOS-Desktop]
-          name=macOS-Desktop
-          lib=libvnc.so
-          ip=127.0.0.1
-          port=5900
-          username=vncuser
-          password=SecretVNC123
-          EOF
-
-          # 7. Start XRDP daemon
-          sudo DYLD_LIBRARY_PATH="/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/usr/local/lib:/usr/local/lib/xrdp" /usr/local/sbin/xrdp &
-          sleep 2
-
-          # 8. Force WindowServer display resolution to 1080p Full HD
-          displayplacer "res:1920x1080" 2>/dev/null || displayplacer "res:1920x1080 scaling:off" 2>/dev/null || true
-
-      # Step 4: Display Connection Info for Windows mstsc.exe
-      - name: Get Connection Details
+      # Step 3: Display Connection Info
+      - name: Get Tailscale IP & Connection Info
         run: |
           TS_IP=$(tailscale ip -4)
           echo ""
           echo "========================================="
-          echo " WINDOWS RDP (mstsc.exe) ACCESS INFO"
-          echo " Computer : $TS_IP"
+          echo " macOS VNC ACCESS INFO"
+          echo " Address  : $TS_IP"
+          echo " Port     : 5900"
           echo " Username : vncuser"
           echo " Password : SecretVNC123"
           echo "========================================="
           echo ""
 
-      # Step 5: Maintain Connection Session
-      - name: Keep Runner Alive
+      # Step 4: Keep Runner Alive
+      - name: Keep Runner Alive for GUI Access
         run: |
-          echo "Runner is waiting for Windows RDP connection..."
+          echo "Runner is waiting for VNC connection..."
           while true; do
-            echo "[$(date)] Runner active - Connect via mstsc.exe to $(tailscale ip -4)"
+            echo "[$(date)] Runner active - Connect via VNC to $(tailscale ip -4):5900"
             sleep 300
           done
