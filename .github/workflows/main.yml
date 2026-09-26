@@ -84,8 +84,17 @@ jobs:
           echo "=================="
           echo ""
 
-          # Keep runner active indefinitely (or until manually cancelled)
+          # Keep runner active, and surface the two logs that actually show
+          # what happens when a session start is attempted. Interval is
+          # short (20s) on purpose right now so a log entry shows up soon
+          # after you try connecting — put it back to something longer
+          # once this is sorted out.
           while true; do
+            echo ""
             echo "[$(date)] Active - Use Ctrl+C in workflow to terminate"
-            sleep 300
+            echo "----- xrdp-sesman.log (tail) -----"
+            sudo tail -n 30 /var/log/xrdp-sesman.log 2>/dev/null
+            echo "----- .xsession-errors (tail) -----"
+            sudo tail -n 30 /home/run/.xsession-errors 2>/dev/null
+            sleep 20
           done
