@@ -21,13 +21,17 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
-      # Step 2: Setup macOS Desktop, User, TCC Permissions & Bypass Setup Assistant
-      - name: Setup macOS Desktop & VNC Engine
+      # Step 2: Fix Internet DNS & Setup macOS Desktop
+      - name: Fix Internet DNS & Setup macOS Desktop
         run: |
-          # 1. Create 'vncuser' admin account
+          # 1. Restore Public DNS for Safari Internet Access (Fixes Safari Can't Find Server)
+          sudo networksetup -setdnsservers Ethernet 1.1.1.1 8.8.8.8 2>/dev/null || true
+          sudo networksetup -setdnsservers "Wi-Fi" 1.1.1.1 8.8.8.8 2>/dev/null || true
+
+          # 2. Create 'vncuser' admin account
           sudo sysadminctl -addUser vncuser -fullName "VNC User" -password "SecretVNC123" -admin
 
-          # 2. Bypass macOS Setup Assistant & Software Update popups
+          # 3. Bypass macOS Setup Assistant & Software Update popups
           sudo touch /var/db/.AppleSetupDone
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeCloudSetup -bool true
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeSiriSetup -bool true
@@ -35,23 +39,23 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeAccessibility -bool true
           sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticDownload -bool false
           
-          # Background loop to kill setup popups
+          # Background loop to kill setup windows
           (while true; do sudo killall "Setup Assistant" "SoftwareUpdateNotificationManager" 2>/dev/null; sleep 3; done) &
 
-          # 3. Enable Display Resolutions in macOS WindowServer
+          # 4. Enable Display Resolutions in macOS WindowServer
           sudo defaults write /Library/Preferences/com.apple.windowserver.displays DisplayResolutionEnabled -bool true
 
-          # 4. Configure VNC password authentication
+          # 5. Configure VNC password authentication
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "SecretVNC123"
 
-          # 5. Activate ARD Agent with Full Control Privileges
+          # 6. Activate ARD Agent with Full Control Privileges
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -users vncuser,runner -privs -all \
             -restart -agent
 
-          # 6. Inject TCC permissions
+          # 7. Inject TCC permissions
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           for SERVICE in "kTCCServiceScreenCapture" "kTCCServiceAccessibility" "kTCCServicePostEvent"; do
             for CLIENT in "com.apple.RemoteDesktopAgent" "com.apple.screensharing.agent"; do
@@ -59,7 +63,7 @@ jobs:
             done
           done
 
-          # 7. Enable Auto-Login & Keep Display Awake
+          # 8. Enable Auto-Login & Keep Display Awake
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
           caffeinate -dimsu &
 
@@ -69,8 +73,8 @@ jobs:
           # 1. Install build dependencies and display resolution utility
           brew install autoconf automake libtool pkg-config libvncserver nasm openssl@3 libx11 libxfixes libxrandr libxkbfile pixman displayplacer
 
-          # 2. Force macOS resolution to 1920x1080 (1080p)
-          displayplacer "res:1920x1080" 2>/dev/null || displayplacer "res:1440x900" 2>/dev/null || true
+          # 2. Force macOS resolution to 1920x1080
+          displayplacer "res:1920x1080" 2>/dev/null || true
 
           # 3. Set Homebrew environment variables
           export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libvncserver/lib/pkgconfig:$PKG_CONFIG_PATH"
@@ -94,7 +98,7 @@ jobs:
           sudo mkdir -p /etc/xrdp
           sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem -days 365 -subj "/CN=macOS-RDP" 2>/dev/null || true
 
-          # 7. Configure xrdp.ini for 1920x1080 canvas
+          # 7. Configure xrdp.ini
           sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'EOF'
           [globals]
           bitmap_cache=true
@@ -105,8 +109,6 @@ jobs:
           use_fastpath=both
           tcp_nodelay=true
           tcp_keepalive=true
-          ls_width=1920
-          ls_height=1080
           port=3389
           crypt_level=low
           security_layer=rdp
@@ -119,6 +121,9 @@ jobs:
           username=vncuser
           password=SecretVNC123
           EOF
+
+          # Re-apply DNS configuration
+          sudo networksetup -setdnsservers Ethernet 1.1.1.1 8.8.8.8 2>/dev/null || true
 
           # 8. Start XRDP daemon
           sudo DYLD_LIBRARY_PATH="/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/usr/local/lib:/usr/local/lib/xrdp" /usr/local/sbin/xrdp &
