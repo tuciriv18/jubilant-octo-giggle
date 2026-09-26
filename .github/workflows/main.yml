@@ -5,7 +5,7 @@ on:
 
 jobs:
   macos-gui:
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 360
 
     steps:
