@@ -195,7 +195,8 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi";
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" };
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-$arch.msi";
           $installerPath = "$env:TEMP\tailscale.msi";
           (New-Object System.Net.WebClient).DownloadFile($tsUrl,$installerPath);
           Start-Process "msiexec.exe" -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait;
@@ -221,10 +222,15 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname="gh-runner-$env:GITHUB_RUN_ID";
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe";
+          if (-not (Test-Path $tsExe)) { $tsExe = "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe"; };
+          if (-not (Test-Path $tsExe)) { $tsExe = "$env:ProgramW6432\Tailscale\tailscale.exe"; };
+          if (-not (Test-Path $tsExe)) { Write-Error "tailscale.exe not found in standard program directories."; exit 1; };
+
+          & "$tsExe" up --authkey=$env:TS_AUTHKEY --hostname="gh-runner-$env:GITHUB_RUN_ID";
           $tsIP = "";
           $retries = 0;
-          while ((-not $tsIP) -and ($retries -lt 12)) { $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4; Start-Sleep -Seconds 5; $retries++; };
+          while ((-not $tsIP) -and ($retries -lt 12)) { $tsIP = & "$tsExe" ip -4; Start-Sleep -Seconds 5; $retries++; };
           if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1; };
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TAILSCALE_IP=$tsIP`n");
 
