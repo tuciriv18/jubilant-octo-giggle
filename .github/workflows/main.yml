@@ -24,29 +24,29 @@ jobs:
       # Step 2: Create New User & Bypass TCC / Fix Black Screen
       - name: Setup New Admin User & TCC Permissions
         run: |
-          # 1. Naya Admin User 'vncuser' banao (Old password error bypass karne ke liye)
+          # 1. Create new Admin user 'vncuser'
           sudo sysadminctl -addUser vncuser -fullName "VNC User" -password "SecretVNC123" -admin
 
-          # 2. VNC Password Authentication mode setup
+          # 2. Configure VNC password via correct kickstart clientopts
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -specifiedvnc -install -vncpasswd "SecretVNC123"
+            -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "SecretVNC123"
 
-          # 3. Remote Management Service restart karo 'vncuser' ke liye
+          # 3. Activate Remote Management service for 'vncuser'
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -users vncuser -privs -all \
             -restart -agent
 
-          # 4. TCC Database me Screen Recording & Accessibility permissions Inject karo (Human Click Bypass)
+          # 4. Inject TCC permissions using explicit column names (bypasses macOS 15 schema column mismatch)
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.RemoteDesktopAgent',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1735689600);"
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceAccessibility','com.apple.RemoteDesktopAgent',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1735689600);"
-          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1735689600);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.RemoteDesktopAgent', 0, 2, 4, 1);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceAccessibility', 'com.apple.RemoteDesktopAgent', 0, 2, 4, 1);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.screensharing.agent', 0, 2, 4, 1);"
 
-          # 5. Auto-Login config setup karo taaki GUI Active ho (Black Screen Fix)
+          # 5. Set Auto-Login for 'vncuser' to activate GUI display session
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
 
-          # 6. Screen Sleep Hone Se Roko
+          # 6. Prevent screen sleep
           caffeinate -dimsu &
 
       # Step 3: Display Connection Info
