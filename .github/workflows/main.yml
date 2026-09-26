@@ -1,10 +1,10 @@
-name: Secure Build & RDP Access
+name: Secure Build
 
 on:
   workflow_dispatch:
     inputs:
       runner_os:
-        description: 'Select OS Runner'
+        description: 'Select Runner'
         required: true
         default: 'ubuntu-latest'
         type: choice
@@ -12,7 +12,6 @@ on:
           - 'ubuntu-latest'
           - 'windows-latest'
           - 'windows-2022'
-          - 'windows-2025'
           - 'windows-11-arm'
 
 jobs:
