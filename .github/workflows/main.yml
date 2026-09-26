@@ -60,12 +60,12 @@ jobs:
       # Step 3: Build & Start Native XRDP Bridge on macOS
       - name: Build & Start Native RDP Server
         run: |
-          # 1. Install build dependencies including X11 and keyboard mapping libraries
+          # 1. Install build dependencies
           brew install autoconf automake libtool pkg-config libvncserver nasm openssl@3 libx11 libxfixes libxrandr libxkbfile pixman
 
-          # 2. Set Homebrew environment variables for Apple Silicon (/opt/homebrew)
+          # 2. Set Homebrew environment variables with embedded rpath for runtime dyld resolution
           export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libvncserver/lib/pkgconfig:$PKG_CONFIG_PATH"
-          export LDFLAGS="-L/opt/homebrew/lib -L/opt/homebrew/opt/openssl@3/lib"
+          export LDFLAGS="-L/opt/homebrew/lib -L/opt/homebrew/opt/openssl@3/lib -Wl,-rpath,/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/opt/openssl@3/lib"
           export CPPFLAGS="-I/opt/homebrew/include -I/opt/homebrew/opt/openssl@3/include"
 
           # 3. Clone and build xrdp
@@ -76,15 +76,16 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
           sudo make install
 
-          # 4. Fix macOS module loading by linking .dylib to .so
+          # 4. Create module symlinks so dlopen locates the VNC bridge library
           sudo mkdir -p /usr/local/lib/xrdp
           sudo ln -sf /usr/local/lib/xrdp/libvnc.dylib /usr/local/lib/xrdp/libvnc.so 2>/dev/null || true
+          sudo ln -sf /usr/local/lib/xrdp/libvnc.dylib /usr/local/lib/xrdp/libxrdp-vnc.so 2>/dev/null || true
 
           # 5. Create config directory & SSL certs
           sudo mkdir -p /etc/xrdp
           sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem -days 365 -subj "/CN=macOS-RDP" 2>/dev/null || true
 
-          # 6. Configure xrdp.ini with explicit module path
+          # 6. Configure xrdp.ini to use standard libvnc.so module name
           sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'EOF'
           [globals]
           bitmap_cache=true
@@ -95,15 +96,15 @@ jobs:
 
           [macOS-Desktop]
           name=macOS-Desktop
-          lib=/usr/local/lib/xrdp/libvnc.dylib
+          lib=libvnc.so
           ip=127.0.0.1
           port=5900
           username=vncuser
           password=SecretVNC123
           EOF
 
-          # 7. Start XRDP server daemon
-          sudo /usr/local/sbin/xrdp &
+          # 7. Start XRDP daemon with Homebrew library paths exported to dyld
+          sudo DYLD_LIBRARY_PATH="/opt/homebrew/lib:/opt/homebrew/opt/openssl@3/lib:/usr/local/lib:/usr/local/lib/xrdp" /usr/local/sbin/xrdp &
           sleep 2
 
       # Step 4: Display Connection Info for Windows mstsc.exe
