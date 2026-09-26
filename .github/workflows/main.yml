@@ -171,10 +171,10 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 2 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1 -Force
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "SecurityLayer" -Value 2 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
           Restart-Service -Name TermService -Force
 
@@ -202,15 +202,12 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-$arch.msi"
-          $installerPath = Join-Path$env:TEMP "tailscale.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           
-          Invoke-WebRequest -Uri $tsUrl -OutFile$installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
-
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          Invoke-WebRequest -Uri $tsUrl -OutFile "$installerPath"
+          Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
+          Remove-Item -Path "$installerPath" -Force -ErrorAction SilentlyContinue
 
       - name: "[Windows] Mint short-lived Tailscale auth key (OAuth client)"
         if: ${{ runner.os == 'Windows' }}
@@ -224,23 +221,11 @@ jobs:
               exit 1
           }
 
-          $tokenBody = "client_id=" + [uri]::EscapeDataString($env:TS_OAUTH_CLIENT_ID) + "&client_secret=" + [uri]::EscapeDataString($env:TS_OAUTH_CLIENT_SECRET)$tokenResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/oauth/token" -ContentType "application/x-www-form-urlencoded" -Body $tokenBody
+          $tokenBody = "client_id=$env:TS_OAUTH_CLIENT_ID&client_secret=$env:TS_OAUTH_CLIENT_SECRET"
+          $tokenResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/oauth/token" -ContentType "application/x-www-form-urlencoded" -Body $tokenBody
           Write-Host "::add-mask::$($tokenResp.access_token)"
 
-          $keyBody = @{
-            capabilities = @{
-              devices = @{
-                create = @{
-                  reusable      = $false
-                  ephemeral     = $true
-                  preauthorized = $true
-                  tags          = @("tag:ci")
-                }
-              }
-            }
-            expirySeconds = 3600
-          } | ConvertTo-Json -Depth 5
-
+          $keyBody = '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:ci"]}}},"expirySeconds":3600}'
           $keyResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/tailnet/-/keys" -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ContentType "application/json" -Body $keyBody
 
           Write-Host "::add-mask::$($keyResp.key)"
@@ -250,12 +235,11 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-
-          tailscale up --authkey=$env:TS_AUTHKEY --hostname="gh-runner-$env:GITHUB_RUN_ID"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname="gh-runner-$env:GITHUB_RUN_ID"
           
           $tsIP = $null$retries = 0
-          while (-not $tsIP -and $retries -lt 10) {$tsIP = tailscale ip -4
+          while (-not $tsIP -and$retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
           }
