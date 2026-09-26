@@ -171,12 +171,12 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force;
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1 -Force;
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "SecurityLayer" -Value 2 -Force;
-          netsh advfirewall firewall delete rule name="RDP-Tailscale";
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10;
-          Restart-Service -Name TermService -Force;
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" "fDenyTSConnections" 0
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" "UserAuthentication" 1
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" "SecurityLayer" 2
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
+          Restart-Service TermService -Force
 
       - name: "[Windows] Create User with added Secret Password"
         if: ${{ runner.os == 'Windows' }}
@@ -185,30 +185,29 @@ jobs:
           RUN_PASSWORD: ${{ secrets.RUN_PASSWORD }}
         run: |
           if ([string]::IsNullOrEmpty($env:RUN_PASSWORD)) {
-              Write-Error "RUN_PASSWORD secret is not set. Add it under repo Settings > Secrets and variables > Actions.";
-              exit 1;
+              Write-Error "RUN_PASSWORD secret is not set. Add it under repo Settings > Secrets and variables > Actions."
+              exit 1
           }
-          $securePass =$env:RUN_PASSWORD | ConvertTo-SecureString -AsPlainText -Force;
-          New-LocalUser -Name "run" -Password $securePass -AccountNeverExpires;
-          Add-LocalGroupMember -Group "Administrators" -Member "run";
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "run";
+          $securePass =$env:RUN_PASSWORD | ConvertTo-SecureString -AsPlainText -Force
+          New-LocalUser "run" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember "Administrators" "run"
+          Add-LocalGroupMember "Remote Desktop Users" "run"
 
-          if (-not (Get-LocalUser -Name "run")) {
-              Write-Error "User creation failed";
-              exit 1;
+          if (-not (Get-LocalUser "run")) {
+              Write-Error "User creation failed"
+              exit 1
           }
 
       - name: "[Windows] Install Tailscale"
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" };
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-$arch.msi";
-          $installerPath = "$env:TEMP\tailscale.msi";
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           
-          Invoke-WebRequest -Uri $tsUrl -OutFile "$installerPath";
-          Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait;
-          Remove-Item -Path "$installerPath" -Force -ErrorAction SilentlyContinue;
+          (New-Object System.Net.WebClient).DownloadFile($tsUrl,$installerPath)
+          Start-Process "msiexec.exe" -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
+          Remove-Item "$installerPath" -Force -ErrorAction SilentlyContinue
 
       - name: "[Windows] Mint short-lived Tailscale auth key (OAuth client)"
         if: ${{ runner.os == 'Windows' }}
@@ -218,65 +217,71 @@ jobs:
           TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
         run: |
           if ([string]::IsNullOrEmpty($env:TS_OAUTH_CLIENT_ID) -or [string]::IsNullOrEmpty($env:TS_OAUTH_CLIENT_SECRET)) {
-              Write-Error "TS_OAUTH_CLIENT_ID or TS_OAUTH_CLIENT_SECRET is missing under Repo Secrets.";
-              exit 1;
+              Write-Error "TS_OAUTH_CLIENT_ID or TS_OAUTH_CLIENT_SECRET is missing under Repo Secrets."
+              exit 1
           }
 
-          $tokenBody = "client_id=$env:TS_OAUTH_CLIENT_ID&client_secret=$env:TS_OAUTH_CLIENT_SECRET";
-          $tokenResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/oauth/token" -ContentType "application/x-www-form-urlencoded" -Body $tokenBody;
-          Write-Host "::add-mask::$($tokenResp.access_token)";
+          $tokenBody = "client_id=" + $env:TS_OAUTH_CLIENT_ID + "&client_secret=" + $env:TS_OAUTH_CLIENT_SECRET$tokenResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/oauth/token" -ContentType "application/x-www-form-urlencoded" -Body $tokenBody
+          Write-Host "::add-mask::$($tokenResp.access_token)"
 
-          $keyBody = '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:ci"]}}},"expirySeconds":3600}';
-          $keyResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/tailnet/-/keys" -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ContentType "application/json" -Body $keyBody;
+          $keyBody = '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true,"tags":["tag:ci"]}}},"expirySeconds":3600}'
+          $keyResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/tailnet/-/keys" -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ContentType "application/json" -Body $keyBody
 
-          Write-Host "::add-mask::$($keyResp.key)";
-          Add-Content -Path $env:GITHUB_ENV -Value "TS_AUTHKEY=$($keyResp.key)";
+          Write-Host "::add-mask::$($keyResp.key)"
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TS_AUTHKEY=$($keyResp.key)`n")
 
       - name: "[Windows] Establish Tailscale Connection"
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname="gh-runner-$env:GITHUB_RUN_ID";
-          $tsIP =$null;
-          $retries = 0;
-          while (-not $tsIP -and$retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4;
-              Start-Sleep -Seconds 5;
-              $retries++;
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname="gh-runner-$env:GITHUB_RUN_ID"
+          
+          $tsIP = ""
+          $retries = 0
+          while ((-not $tsIP) -and ($retries -lt 12)) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
 
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting.";
-              exit 1;
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
           }
-          Add-Content -Path $env:GITHUB_ENV -Value "TAILSCALE_IP=$tsIP";
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TAILSCALE_IP=$tsIP`n")
 
       - name: "[Windows] Verify Accessibility"
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP";
-          $targetIp =$env:TAILSCALE_IP;
-          $testResult = Test-NetConnection -ComputerName$targetIp -Port 3389;
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed";
-              exit 1;
+          $ip = "$env:TAILSCALE_IP"
+          Write-Host "Tailscale IP: $ip"
+          if ([string]::IsNullOrEmpty($ip)) {
+              Write-Error "TAILSCALE_IP environment variable was not found."
+              exit 1
           }
-          Write-Host "TCP connectivity successful!";
+          try {
+              $client = New-Object System.Net.Sockets.TcpClient
+              $client.Connect($ip, 3389)$client.Close()
+              Write-Host "TCP connectivity successful!"
+          } catch {
+              Write-Error "TCP connection to RDP port 3389 failed: $_"
+              exit 1
+          }
 
       - name: "[Windows] Maintain Connection"
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          Write-Host "";
-          Write-Host "=== ACCESS ===";
-          Write-Host "Address: $env:TAILSCALE_IP";
-          Write-Host "Username: run";
-          Write-Host "Password: (the one you set in the RUN_PASSWORD secret)";
-          Write-Host "==================";
-          Write-Host "";
+          Write-Host ""
+          Write-Host "=== ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: run"
+          Write-Host "Password: (the one you set in the RUN_PASSWORD secret)"
+          Write-Host "=================="
+          Write-Host ""
 
           while ($true) {
-              Write-Host "[$(Get-Date)] Active - Use Ctrl+C in workflow to terminate";
-              Start-Sleep -Seconds 300;
+              Write-Host "[$(Get-Date)] Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
