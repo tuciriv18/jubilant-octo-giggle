@@ -12,7 +12,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Step 1: Connect to Tailscale
+      # Step 1: Connect to Tailscale Network
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -21,7 +21,7 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
-      # Step 2: Configure macOS VNC, TCC, and Bypass Setup Assistant
+      # Step 2: Setup macOS Desktop, User, TCC Permissions & Bypass Setup Assistant
       - name: Setup macOS Desktop & VNC Engine
         run: |
           # 1. Create 'vncuser' admin account
@@ -57,24 +57,42 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
           caffeinate -dimsu &
 
-      # Step 3: Install & Start RDP Bridge (Exposes Port 3389 for Windows mstsc.exe)
-      - name: Install & Start RDP-to-VNC Proxy
+      # Step 3: Start RDP Bridge on Port 3389 for Windows mstsc.exe
+      - name: Start RDP-to-VNC Bridge (Port 3389)
         run: |
-          brew install guacd
-          brew install freerdp
+          brew install colima docker
+          colima start --cpu 2 --memory 2g
+          
+          docker run -d --name rdp-bridge \
+            -p 3389:3389 \
+            --add-host=host.docker.internal:host-gateway \
+            alpine sh -c "
+              apk add --no-cache xrdp ;
+              cat << 'EOF' > /etc/xrdp/xrdp.ini
+          [globals]
+          bitmap_cache=true
+          bitmap_compression=true
+          port=3389
 
-          # Start guacd daemon in background
-          guacd -b 127.0.0.1 -l 4822 &
-          sleep 3
+          [macOS-Desktop]
+          name=macOS-Desktop
+          lib=libvnc.so
+          ip=host.docker.internal
+          port=5900
+          username=vncuser
+          password=SecretVNC123
+          EOF
+              xrdp -nodaemon
+            "
 
-      # Step 4: Display Connection Info for mstsc.exe
+      # Step 4: Display Connection Info for Windows mstsc.exe
       - name: Get Connection Details
         run: |
           TS_IP=$(tailscale ip -4)
           echo ""
           echo "========================================="
           echo " WINDOWS RDP (mstsc.exe) ACCESS INFO"
-          echo " Computer : $TS_IP:5900"
+          echo " Computer : $TS_IP"
           echo " Username : vncuser"
           echo " Password : SecretVNC123"
           echo "========================================="
@@ -85,6 +103,6 @@ jobs:
         run: |
           echo "Runner is waiting for Windows RDP connection..."
           while true; do
-            echo "[$(date)] Runner active - Connect via Windows RDP (mstsc.exe) to $(tailscale ip -4):5900"
+            echo "[$(date)] Runner active - Connect via mstsc.exe to $(tailscale ip -4)"
             sleep 300
           done
