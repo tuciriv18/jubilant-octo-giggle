@@ -21,26 +21,35 @@ jobs:
           tags: tag:ci
           hostname: gh-runner-${{ github.run_id }}
 
-      # Step 2: Configure Password & VNC Server
-      - name: Setup & Start VNC Server
+      # Step 2: Create New User & Bypass TCC / Fix Black Screen
+      - name: Setup New Admin User & TCC Permissions
         run: |
-          # 1. 'runner' user ka system password change karein (bypassing Secure Token)
-          sudo dscl . -passwd /Users/runner "SecretVNC123"
+          # 1. Naya Admin User 'vncuser' banao (Old password error bypass karne ke liye)
+          sudo sysadminctl -addUser vncuser -fullName "VNC User" -password "SecretVNC123" -admin
 
-          # 2. TigerVNC ke liye direct VNC authentication mode enable karein
+          # 2. VNC Password Authentication mode setup
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -configure -specifiedvnc -install -vncpasswd "SecretVNC123"
 
-          # 3. Remote Management service restart karein
+          # 3. Remote Management Service restart karo 'vncuser' ke liye
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
-            -users runner -privs -all \
+            -users vncuser -privs -all \
             -restart -agent
 
-          # 4. Display awake rakhein
+          # 4. TCC Database me Screen Recording & Accessibility permissions Inject karo (Human Click Bypass)
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.RemoteDesktopAgent',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1735689600);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceAccessibility','com.apple.RemoteDesktopAgent',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1735689600);"
+          sudo sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1735689600);"
+
+          # 5. Auto-Login config setup karo taaki GUI Active ho (Black Screen Fix)
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
+
+          # 6. Screen Sleep Hone Se Roko
           caffeinate -dimsu &
 
-      # Step 3: Display Connection Details
+      # Step 3: Display Connection Info
       - name: Get Tailscale IP & Connection Info
         run: |
           TS_IP=$(tailscale ip -4)
@@ -49,12 +58,12 @@ jobs:
           echo " macOS VNC ACCESS INFO"
           echo " Address  : $TS_IP"
           echo " Port     : 5900"
-          echo " Username : runner"
+          echo " Username : vncuser"
           echo " Password : SecretVNC123"
           echo "========================================="
           echo ""
 
-      # Step 4: Maintain Active Session
+      # Step 4: Keep Runner Alive
       - name: Keep Runner Alive for GUI Access
         run: |
           echo "Runner is waiting for VNC connection..."
