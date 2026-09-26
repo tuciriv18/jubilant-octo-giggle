@@ -13,7 +13,7 @@ jobs:
       - name: Install Desktop Environment and XRDP
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xrdp xorgxrdp dbus-x11
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xfce4-session xfce4-settings xfconf xrdp xorgxrdp xorg dbus dbus-x11 dbus-user-session
 
       - name: Create User with added Secret Password
         env:
@@ -30,10 +30,45 @@ jobs:
 
       - name: Configure XRDP Session and Firewall
         run: |
-          # Point xrdp at an XFCE session for the new user
-          echo "dbus-launch --exit-with-session startxfce4" | sudo tee /home/run/.xsession
+          # Exact session-start logic from the version that actually booted.
+          # No dbus-launch wrapper: startxfce4 sets up D-Bus itself, but
+          # only once DBUS_SESSION_BUS_ADDRESS / XDG_RUNTIME_DIR are cleared
+          # first, in case xrdp's session left them set to something stale.
+          sudo tee /home/run/.xsession > /dev/null <<'EOF'
+          #!/bin/sh
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          exec /usr/bin/startxfce4
+          EOF
           sudo chown run:run /home/run/.xsession
           sudo chmod +x /home/run/.xsession
+
+          # Bypass /etc/X11/Xsession (Debian's own wrapper script) entirely
+          # and go straight to .xsession with the environment pre-set —
+          # this was the other half of what actually worked.
+          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+          #!/bin/sh
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          if [ -r /etc/profile ]; then . /etc/profile; fi
+          if [ -r "$HOME/.profile" ]; then . "$HOME/.profile"; fi
+          export XDG_CONFIG_DIRS=/etc:/etc/xdg
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          exec "$HOME/.xsession"
+          EOF
+          sudo chmod 755 /etc/xrdp/startwm.sh
 
           # xrdp needs this to read the TLS cert it generates on install
           sudo adduser xrdp ssl-cert
