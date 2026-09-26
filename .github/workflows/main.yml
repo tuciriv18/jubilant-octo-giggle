@@ -6,11 +6,11 @@ on:
       ubuntu_latest:
         description: 'Run on ubuntu-latest'
         type: boolean
-        default: false
+        default: true
       windows_latest:
         description: 'Run on windows-latest'
         type: boolean
-        default: true
+        default: false
       windows_2022:
         description: 'Run on windows-2022'
         type: boolean
@@ -34,8 +34,9 @@ jobs:
           if [ "${{ inputs.windows_2022 }}" = "true" ]; then RUNNERS+=('"windows-2022"'); fi
           if [ "${{ inputs.windows_11_arm }}" = "true" ]; then RUNNERS+=('"windows-11-arm"'); fi
 
+          # Default fallback if nothing selected
           if [ ${#RUNNERS[@]} -eq 0 ]; then
-            RUNNERS+=('"windows-latest"')
+            RUNNERS+=('"ubuntu-latest"')
           fi
 
           JSON_ARRAY="[$(IFS=,; echo "${RUNNERS[*]}")]"
