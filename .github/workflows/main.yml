@@ -256,7 +256,8 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP";
-          $testResult = Test-NetConnection -ComputerName$env:TAILSCALE_IP -Port 3389;
+          $targetIp =$env:TAILSCALE_IP;
+          $testResult = Test-NetConnection -ComputerName$targetIp -Port 3389;
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed";
               exit 1;
