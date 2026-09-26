@@ -188,7 +188,7 @@ jobs:
               Write-Error "RUN_PASSWORD secret is not set. Add it under repo Settings > Secrets and variables > Actions."
               exit 1
           }
-          $securePass = ConvertTo-SecureString -String "$env:RUN_PASSWORD" -AsPlainText -Force
+          $securePass = ConvertTo-SecureString -String$env:RUN_PASSWORD -AsPlainText -Force
           New-LocalUser -Name "run" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "run"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "run"
@@ -202,11 +202,16 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-$arch.msi"
+          $installerPath = Join-Path$env:TEMP "tailscale.msi"
+          
           Invoke-WebRequest -Uri $tsUrl -OutFile$installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
+
+          # Refresh PATH for current session
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
       - name: "[Windows] Mint short-lived Tailscale auth key (OAuth client)"
         if: ${{ runner.os == 'Windows' }}
@@ -215,8 +220,12 @@ jobs:
           TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
         run: |
-          $tokenBody = "client_id=$([uri]::EscapeDataString($env:TS_OAUTH_CLIENT_ID))&client_secret=$([uri]::EscapeDataString($env:TS_OAUTH_CLIENT_SECRET))"
-          $tokenResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/oauth/token" -ContentType "application/x-www-form-urlencoded" -Body $tokenBody
+          if ([string]::IsNullOrEmpty($env:TS_OAUTH_CLIENT_ID) -or [string]::IsNullOrEmpty($env:TS_OAUTH_CLIENT_SECRET)) {
+              Write-Error "TS_OAUTH_CLIENT_ID or TS_OAUTH_CLIENT_SECRET is missing under Repo Secrets."
+              exit 1
+          }
+
+          $tokenBody = "client_id=" + [uri]::EscapeDataString($env:TS_OAUTH_CLIENT_ID) + "&client_secret=" + [uri]::EscapeDataString($env:TS_OAUTH_CLIENT_SECRET)$tokenResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/oauth/token" -ContentType "application/x-www-form-urlencoded" -Body $tokenBody
           Write-Host "::add-mask::$($tokenResp.access_token)"
 
           $keyBody = @{
@@ -236,15 +245,19 @@ jobs:
           $keyResp = Invoke-RestMethod -Method Post -Uri "https://api.tailscale.com/api/v2/tailnet/-/keys" -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ContentType "application/json" -Body $keyBody
 
           Write-Host "::add-mask::$($keyResp.key)"
-          echo "TS_AUTHKEY=$($keyResp.key)" >> $env:GITHUB_ENV
+          "TS_AUTHKEY=$($keyResp.key)" \vert{} Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: "[Windows] Establish Tailscale Connection"
         if: ${{ runner.os == 'Windows' }}
         shell: powershell
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname=gh-runner-$env:GITHUB_RUN_ID$tsIP = $null$retries = 0
-          while (-not $tsIP -and$retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          # Refresh session environment
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+          tailscale up --authkey=$env:TS_AUTHKEY --hostname="gh-runner-$env:GITHUB_RUN_ID"
+          
+          $tsIP = $null$retries = 0
+          while (-not $tsIP -and $retries -lt 10) {$tsIP = tailscale ip -4
               Start-Sleep -Seconds 5
               $retries++
           }
@@ -253,7 +266,7 @@ jobs:
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          "TAILSCALE_IP=$tsIP" \vert{} Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: "[Windows] Verify Accessibility"
         if: ${{ runner.os == 'Windows' }}
