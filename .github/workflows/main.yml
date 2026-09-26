@@ -1,11 +1,34 @@
-- name: Run macOS in Docker (dockurr/macos)
+name: macOS VM (Linux Host)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      # Not guaranteed by GitHub — this can pass on one run and fail on the
+      # next depending on what hardware the job lands on. Fails fast and
+      # clearly here rather than hanging inside the container later.
+      - name: Check KVM availability
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cpu-checker
+          if ! sudo kvm-ok; then
+            echo "::error::KVM isn't available on this run's hardware. This varies run to run — try re-running the workflow."
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      # Docker is already on GitHub's Ubuntu runners, no separate install step needed.
+      - name: Run macOS in Docker (dockurr/macos)
         run: |
           docker run -d --name macos \
             -e VERSION="15" \
-            -e RAM_SIZE="12G" \
+            -e RAM_SIZE="16G" \
             -e DISK_SIZE="64G" \
-            -e WIDTH="1920" \
-            -e HEIGHT="1080" \
             -p 8006:8006 \
             -p 5900:5900 \
             --device=/dev/kvm \
@@ -13,3 +36,62 @@
             --cap-add NET_ADMIN \
             --stop-timeout 120 \
             dockurr/macos
+
+      - name: Wait for VNC port
+        run: |
+          for i in $(seq 1 30); do
+            if timeout 3 bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/5900" 2>/dev/null; then
+              echo "VNC port is up."
+              exit 0
+            fi
+            echo "Waiting for VNC port... ($i/30)"
+            sleep 5
+          done
+          echo "::error::VNC port never came up. Container logs:"
+          docker logs macos --tail 50 || true
+          exit 1
+
+      # Reuses the same Tailscale secrets from the Windows/Linux workflows.
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
+          tags: tag:ci
+          hostname: gh-runner-${{ github.run_id }}
+
+      - name: Get Tailscale IP
+        run: |
+          TS_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+
+      - name: Configure Firewall
+        run: |
+          sudo ufw allow from 100.64.0.0/10 to any port 5900 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 8006 proto tcp
+          sudo ufw --force enable
+
+      - name: Show Connection Info
+        run: |
+          echo ""
+          echo "=== macOS VM ACCESS ==="
+          echo "Easiest — open in a browser (Chrome is fine, no install needed):"
+          echo "  http://$TAILSCALE_IP:8006"
+          echo ""
+          echo "Or with a VNC client — NOT your Windows RDP app, VNC is a"
+          echo "different protocol, you'd need a separate VNC client for this:"
+          echo "  Server: $TAILSCALE_IP"
+          echo "  Port:   5900"
+          echo ""
+          echo "No password on the viewer itself — access is gated only by"
+          echo "Tailscale plus the firewall rule above."
+          echo "======================="
+
+      - name: Maintain Connection
+        run: |
+          while true; do
+            echo "[$(date)] Active - Use Ctrl+C in workflow to terminate"
+            docker ps || true
+            docker logs macos --tail 20 2>&1 || true
+            sleep 60
+          done
