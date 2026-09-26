@@ -27,13 +27,15 @@ jobs:
           # 1. Create 'vncuser' admin account
           sudo sysadminctl -addUser vncuser -fullName "VNC User" -password "SecretVNC123" -admin
 
-          # 2. Bypass macOS Setup Assistant modal window
+          # 2. Bypass macOS Setup Assistant modal window completely
           sudo touch /var/db/.AppleSetupDone
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeCloudSetup -bool true
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeSiriSetup -bool true
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeePrivacy -bool true
           sudo defaults write /Library/Preferences/com.apple.SetupAssistant DidSeeAccessibility -bool true
-          sudo killall "Setup Assistant" 2>/dev/null || true
+          
+          # Aggressive background loop to kill Setup Assistant if it pops up (Fixes the Network Wi-Fi screen)
+          (while true; do sudo killall "Setup Assistant" 2>/dev/null; sleep 3; done) &
 
           # 3. Configure VNC password authentication
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
