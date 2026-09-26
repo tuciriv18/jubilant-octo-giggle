@@ -33,6 +33,7 @@ jobs:
           # Point xrdp at an XFCE session for the new user
           echo "dbus-launch --exit-with-session startxfce4" | sudo tee /home/run/.xsession
           sudo chown run:run /home/run/.xsession
+          sudo chmod +x /home/run/.xsession
 
           # xrdp needs this to read the TLS cert it generates on install
           sudo adduser xrdp ssl-cert
