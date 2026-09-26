@@ -57,25 +57,30 @@ jobs:
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
           caffeinate -dimsu &
 
-      # Step 3: Build & Start Native Native XRDP Bridge on macOS (No VM / Docker Required)
+      # Step 3: Build & Start Native XRDP Bridge on macOS
       - name: Build & Start Native RDP Server
         run: |
-          # 1. Install build dependencies
-          brew install autoconf automake libtool pkg-config libvncserver nasm openssl@3
+          # 1. Install build dependencies including X11 libraries
+          brew install autoconf automake libtool pkg-config libvncserver nasm openssl@3 libx11 libxfixes libxrandr
 
-          # 2. Clone and build xrdp natively on macOS host
+          # 2. Set Homebrew environment variables for Apple Silicon (/opt/homebrew)
+          export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:$PKG_CONFIG_PATH"
+          export LDFLAGS="-L/opt/homebrew/lib"
+          export CPPFLAGS="-I/opt/homebrew/include"
+
+          # 3. Clone and build xrdp
           git clone --recursive https://github.com/neutrinolabs/xrdp.git
           cd xrdp
           ./bootstrap
-          ./configure --enable-vnc --prefix=/usr/local
+          ./configure --enable-vnc --prefix=/usr/local --x-includes=/opt/homebrew/include --x-libraries=/opt/homebrew/lib
           make -j$(sysctl -n hw.ncpu)
           sudo make install
 
-          # 3. Create config directory & SSL certs
+          # 4. Create config directory & SSL certs
           sudo mkdir -p /etc/xrdp
           sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem -days 365 -subj "/CN=macOS-RDP" 2>/dev/null || true
 
-          # 4. Configure xrdp.ini to proxy incoming RDP (3389) directly to macOS VNC (5900)
+          # 5. Configure xrdp.ini to proxy incoming RDP (3389) directly to macOS VNC (5900)
           sudo tee /etc/xrdp/xrdp.ini > /dev/null << 'EOF'
           [globals]
           bitmap_cache=true
@@ -93,7 +98,7 @@ jobs:
           password=SecretVNC123
           EOF
 
-          # 5. Start XRDP server daemon
+          # 6. Start XRDP server daemon
           sudo /usr/local/sbin/xrdp &
           sleep 2
 
